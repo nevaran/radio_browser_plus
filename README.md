@@ -2,7 +2,7 @@
 
 A standalone web application for discovering, streaming, and organizing radio stations from the [Radio Browser API](https://www.radio-browser.info/).
 
-Radio Browser Plus was initially taken from the Home Assistant Radio Browser integration and then developed and improved into a standalone app. It keeps the useful radio-station discovery experience while adding its own web interface, authentication, favorites, collections, and persistent data storage.
+Radio Browser Plus was initially taken from the Home Assistant Radio Browser integration and then developed and improved into a standalone app and migrated to Rust for performance and security improvements. It keeps the useful radio-station discovery experience while adding its own web interface, authentication, favorites, collections, and persistent data storage.
 
 ## Features
 
@@ -14,8 +14,7 @@ Radio Browser Plus was initially taken from the Home Assistant Radio Browser int
   - **Languages**: Filter by language using certain tags
   - **Genre**: Discover stations using certain tags
 - Search functionality to find specific radio stations
-- Stream audio through Home Assistant media players
-- Click tracking (registers your listening with Radio Browser)
+- Stream audio through any device that supports a web browser
 - User authentication and per-user favorites
 - Persistent favorites stored in the local `data/` directory
 
@@ -83,7 +82,7 @@ filter stations by country, language, or tags, and select a station to stream.
 
 ## Support
 
-For issues, feature requests, or questions, please visit the [GitHub repository](https://github.com/yourusername/radio_browser_plus/issues).
+For issues, feature requests, or questions, please visit the [GitHub repository](https://github.com/nevaran/radio_browser_plus/issues).
 
 ## License
 

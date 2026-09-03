@@ -47,9 +47,7 @@ env/
 .coverage
 htmlcov/
 
-# Home Assistant
-.homeassistant/
-configuration.yaml
+# Configurations
 secrets.yaml
 .env
 docker-compose.yml

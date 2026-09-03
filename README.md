@@ -11,7 +11,7 @@ Radio Browser Plus was initially taken from the Home Assistant Radio Browser int
   - **Category**: Browse by music genres and categories
   - **Language**: Filter by language
   - **Country**: Find stations by country
-  - **Local Stations**: Discover stations near your location (based on Home Assistant GPS coordinates)
+  - **Genre**: Discover stations using certain tags
 - Search functionality to find specific radio stations
 - Stream audio through Home Assistant media players
 - Click tracking (registers your listening with Radio Browser)

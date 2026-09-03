@@ -1,0 +1,12 @@
+{
+  "admin": {
+    "username": "admin",
+    "password_hash": "$2b$12$NUSv.KfAD4KcW5kD0hr8Auxxdlt5nzQhG5pkPB8H0Yj1rKuZHQHM2",
+    "role": "admin"
+  },
+  "reader01": {
+    "username": "reader01",
+    "password_hash": "$2b$12$kcVPzd0xz7/WWCGu.Gijb.juMZKCqqoZRqSLlWuUmgBM0Hl3TfvmS",
+    "role": "reader"
+  }
+}

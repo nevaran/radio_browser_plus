@@ -4,6 +4,10 @@ A standalone web application for discovering, streaming, and organizing radio st
 
 Radio Browser Plus was initially taken from the Home Assistant Radio Browser integration and then developed and improved into a standalone app and migrated to Rust for performance and security improvements. It keeps the useful radio-station discovery experience while adding its own web interface, authentication, favorites, collections, and persistent data storage.
 
+Both the backend and the frontend are written in Rust: the backend is an
+Axum JSON API, and the browser UI is a [Leptos](https://leptos.dev/) WebAssembly
+single-page app (client-side rendering) that talks to that API.
+
 ## Features
 
 - Browse radio stations by:
@@ -48,8 +52,22 @@ significantly more time, memory, and bandwidth.
 
 Requirements:
 
-- Rust 1.94+
+- Rust 1.98+
 - Cargo
+- For frontend work: the `wasm32-unknown-unknown` target and
+  [Trunk](https://trunkrs.dev/) (`rustup target add wasm32-unknown-unknown`
+  and `cargo install trunk --locked`)
+
+The repo is a Cargo workspace (backend + `frontend/` members) with a single
+`Cargo.lock` and a single `target/` directory at the root; Trunk also writes
+its output to the root `dist/`. Plain `cargo build` / `cargo test` only target
+the backend — the wasm-only frontend is built explicitly via Trunk.
+
+Build the frontend once (output goes to `dist/`, served by the backend):
+
+```bash
+cd frontend && trunk build --release && cd ..
+```
 
 Run the application with:
 
@@ -57,10 +75,24 @@ Run the application with:
 cargo run --release
 ```
 
-The server listens on port `8000` by default.
+The server listens on port `8000` by default and serves the API plus the
+built frontend from `dist/`.
+
+### Frontend development
+
+The Leptos app lives in `frontend/` and calls the same `/api/*` endpoints as
+the previous JavaScript UI — the backend API is unchanged. For UI work, run
+the backend and the Trunk dev server (which proxies `/api` and `/health` to
+port 8000) side by side:
+
+```bash
+cargo run
+cd frontend && trunk serve
+```
+
+Then open the URL printed by Trunk (port 8080 by default).
 
 ## First Configuration
-
 1. Open `http://localhost:8000` in a browser
 2. Sign in with the application user account. Default first user is admin/admin
 3. Browse or search for radio stations, create more users
@@ -79,6 +111,31 @@ filter stations by country, language, or tags, and select a station to stream.
 - Favorites persist across restarts
 - Native Home Assistant entities for favorites management
 - Separate favorites list for each Radio Browser Plus integration
+
+## Frontend architecture (Leptos)
+
+- `frontend/src/` — components (`sidebar`, `station_grid`, `collection_grid`,
+  `now_playing`, `auth_modals`), typed API client (`api.rs`), reactive state
+  (`state.rs`), audio playback (`player.rs`), data models (`models.rs`), pure
+  helpers (`utils.rs`, covered by unit tests).
+- `frontend/index.html` — Trunk entry shell; Trunk injects the WASM bundle,
+  the (unchanged) stylesheet, the favicon, and the flag icons (`/flags/*`).
+- The Axum backend serves the root `dist/` (see `Dockerfile`, which builds the
+  frontend with Trunk and then the backend as a static binary).
+
+Notes on the migration from the previous JavaScript UI (`public/app.js`,
+`public/sort-worker.js`, removed):
+
+- Same views (All, Popular, Favorites, Countries, Languages, Genres), search
+  with debounce, `#view/filter` hash deep links, auth dialogs, favorites with
+  live metadata refresh, now-playing bar with stream-health indicator, volume /
+  mute with persistence, and keyboard shortcuts (`M`, `Space`, arrows).
+- Performance: fine-grained reactivity re-renders only changed nodes; sorting
+  runs directly in WASM (the sort Web Worker was removed as obsolete); station
+  artwork uses native lazy loading.
+- One intentional behavior fix: the old retry chain cleared its "is playing"
+  flag before checking it, so it could never run. The Rust player tracks
+  playback intent explicitly, so the 5 × 3s retry chain now works.
 
 ## Support
 

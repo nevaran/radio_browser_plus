@@ -1,0 +1,229 @@
+//! Root component: layout shell plus one-time browser wiring.
+
+use gloo_timers::callback::Interval;
+use leptos::prelude::*;
+use wasm_bindgen::{closure::Closure, JsCast};
+
+use crate::components::{
+    ChangePasswordModal, CollectionGrid, CreateUserModal, LoginModal, NowPlaying, Sidebar,
+    StationGrid,
+};
+use crate::state::{AppState, STATION_REFRESH_MS};
+
+#[component]
+pub fn App() -> impl IntoView {
+    let state = AppState::new();
+    provide_context(state.clone());
+    init_app(state.clone());
+
+    let title = state.clone();
+    let menu = state.clone();
+    let grid_view = state.view;
+    let grid_filter = state.filter;
+
+    view! {
+        <div class="app-shell">
+            <Sidebar />
+            <main class="content">
+                <div class="toolbar">
+                    <button
+                        id="menu-toggle"
+                        class="menu-toggle"
+                        aria-label="Toggle menu"
+                        on:click=move |_| menu.sidebar_open.update(|open| *open = !*open)
+                    >
+                        "☰"
+                    </button>
+                    <h2 id="view-title">{move || title.view_title.get()}</h2>
+                </div>
+                <div id="station-grid" class="station-grid">
+                    {move || {
+                        let collection = matches!(
+                            grid_view.get().as_str(),
+                            "countries" | "languages" | "tags" | "genres"
+                        ) && grid_filter.get().is_none();
+                        if collection {
+                            view! { <CollectionGrid /> }.into_any()
+                        } else {
+                            view! { <StationGrid /> }.into_any()
+                        }
+                    }}
+                </div>
+                <NowPlaying />
+            </main>
+        </div>
+        <LoginModal />
+        <CreateUserModal />
+        <ChangePasswordModal />
+    }
+}
+
+/// One-time startup: viewport fix, initial route, session restore, listeners.
+fn init_app(state: AppState) {
+    update_viewport_safe_area();
+    state.apply_hash();
+
+    // Restore session (silent — the login dialog only appears when an action
+    // needs authentication, same as the previous UI).
+    {
+        let state = state.clone();
+        leptos::task::spawn_local(async move {
+            match crate::api::fetch_me().await {
+                Ok(user) => {
+                    state.user.set(Some(user));
+                    state.ensure_favorites().await;
+                    if state.view.get_untracked() == "favorites" {
+                        state.load_view();
+                    }
+                }
+                Err(_) => state.user.set(None),
+            }
+        });
+    }
+
+    // Hash routing (back/forward buttons + `#view/filter` deep links).
+    {
+        let state = state.clone();
+        let on_hash = Closure::wrap(Box::new(move || {
+            state.apply_hash();
+        }) as Box<dyn Fn()>);
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_onhashchange(Some(on_hash.as_ref().unchecked_ref()));
+        }
+        on_hash.forget();
+    }
+
+    // Viewport + compact-bar recompute on resize.
+    {
+        let state = state.clone();
+        let on_resize = Closure::wrap(Box::new(move || {
+            update_viewport_safe_area();
+            state.resize_tick.update(|t| *t += 1);
+        }) as Box<dyn Fn()>);
+        if let Some(window) = web_sys::window() {
+            let _ = window
+                .add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
+        }
+        on_resize.forget();
+    }
+
+    // Close the mobile menu when tapping outside of it.
+    {
+        let state = state.clone();
+        let on_doc_click = Closure::wrap(Box::new(move |ev: web_sys::MouseEvent| {
+            if !state.sidebar_open.get_untracked() {
+                return;
+            }
+            let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+                return;
+            };
+            let target = ev.target();
+            let inside = |selector: &str| {
+                document
+                    .query_selector(selector)
+                    .ok()
+                    .flatten()
+                    .zip(target.clone())
+                    .is_some_and(|(el, t)| el.contains(Some(&t.unchecked_into())))
+            };
+            if !inside("#sidebar") && !inside("#menu-toggle") {
+                state.sidebar_open.set(false);
+            }
+        }) as Box<dyn Fn(web_sys::MouseEvent)>);
+        if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+            let _ = document
+                .add_event_listener_with_callback("click", on_doc_click.as_ref().unchecked_ref());
+        }
+        on_doc_click.forget();
+    }
+
+    // Keyboard shortcuts: M mute, Space play/pause, arrows volume.
+    {
+        let state = state.clone();
+        let on_key = Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
+            if let Some(target) = ev.target() {
+                if let Ok(el) = target.dyn_into::<web_sys::HtmlElement>() {
+                    match el.tag_name().to_uppercase().as_str() {
+                        "INPUT" | "TEXTAREA" | "SELECT" => return,
+                        _ => {}
+                    }
+                }
+            }
+            if ev.key().to_lowercase() == "m" {
+                ev.prevent_default();
+                state.player.toggle_mute();
+            } else if ev.code() == "Space" {
+                ev.prevent_default();
+                if state.player.is_playing.get_untracked() {
+                    state.player.pause();
+                } else {
+                    state.player.resume();
+                }
+            } else if ev.code() == "ArrowLeft" {
+                ev.prevent_default();
+                let v = state.player.volume.get_untracked();
+                state.player.set_volume(v - 0.05);
+            } else if ev.code() == "ArrowRight" {
+                ev.prevent_default();
+                let v = state.player.volume.get_untracked();
+                state.player.set_volume(v + 0.05);
+            }
+        }) as Box<dyn Fn(web_sys::KeyboardEvent)>);
+        if let Some(window) = web_sys::window() {
+            let _ =
+                window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+        }
+        on_key.forget();
+    }
+
+    // Periodic refresh of the visible view (every 6h, as before).
+    {
+        let state = state.clone();
+        Interval::new(STATION_REFRESH_MS, move || state.load_view()).forget();
+    }
+}
+
+/// Mobile-browser-chrome workaround: pin layout heights through CSS vars.
+fn update_viewport_safe_area() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Some(root) = document
+        .document_element()
+        .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return;
+    };
+    let inner_w = window
+        .inner_width()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1024.0);
+    let inner_h = window
+        .inner_height()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(768.0);
+    let client_h = f64::from(root.client_height()).max(1.0);
+    let inset = (inner_h - client_h).max(0.0);
+
+    let style = root.style();
+    let _ = style.set_property("--viewport-height", &format!("{client_h}px"));
+    let _ = style.set_property("--safe-top", "0px");
+    let _ = style.set_property("--safe-bottom", &format!("{inset}px"));
+    let _ = style.set_property("--mobile-bottom-gap", &format!("{inset}px"));
+
+    if let Some(body) = document.body() {
+        let body_style = body.style();
+        if inner_w <= 768.0 {
+            let _ = body_style.set_property("height", &format!("{client_h}px"));
+            let _ = body_style.set_property("min-height", &format!("{client_h}px"));
+        } else {
+            let _ = body_style.remove_property("height");
+            let _ = body_style.remove_property("min-height");
+        }
+    }
+}

@@ -33,6 +33,13 @@ async fn main() {
 
     info!("Starting Radio Browser Plus server");
 
+    if !std::path::Path::new("dist/index.html").exists() {
+        tracing::warn!(
+            "dist/index.html not found - build the Leptos frontend first \
+             (cd frontend && trunk build --release) or run it via `trunk serve`"
+        );
+    }
+
     // Initialize infrastructure
     let radio_client = RadioBrowserClient::new(None);
     let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
@@ -190,8 +197,8 @@ async fn main() {
             }),
         )
         .fallback_service(
-            ServeDir::new("public")
-                .fallback(ServeFile::new("public/index.html"))
+            ServeDir::new("dist")
+                .fallback(ServeFile::new("dist/index.html"))
         );
 
     // Start server

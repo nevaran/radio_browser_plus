@@ -12,33 +12,44 @@ path = "src/main.rs"
 [dependencies]
 # Web framework and async runtime
 axum = { version = "0.8", features = ["json", "macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "net", "time"] }
-tower-http = { version = "0.6", features = ["fs", "cors", "trace", "set-header"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "net"] }
+tower-http = { version = "0.7", features = ["fs"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # HTTP client for external API calls
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Error handling
-thiserror = "1.0"
-anyhow = "1.0"
+thiserror = "2.0"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-bytes = "1.5"
-hyper = { version = "1", features = ["full"] }
 urlencoding = "2.1"
-bcrypt = "0.15"
+bcrypt = "0.19"
 
 [profile.release]
 opt-level = 3
 lto = true
 strip = true
+# The frontend must keep its `target_features` custom section: rustc emits
+# bulk-memory/nontrapping-fp ops by default and records them there, and the
+# wasm-opt version pinned by Trunk only enables those features when the
+# section is present. (`strip` would remove it and break the Trunk build.)
+[profile.release.package.radio-browser-plus-frontend]
+strip = false
+
+[workspace]
+resolver = "2"
+members = ["frontend"]
+# Default cargo commands (build/test/...) only target the backend so the
+# wasm-only frontend never gets built for the host by accident. The frontend
+# is built explicitly via trunk (output: root dist/, artifacts: root target/).
+default-members = ["."]

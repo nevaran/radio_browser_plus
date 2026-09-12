@@ -1,0 +1,20 @@
+# Trunk build configuration for the Leptos CSR frontend.
+# Release output goes to the workspace-root dist/; the Axum backend serves
+# that directory. All generated artifacts live at the root (target/, dist/).
+[build]
+target = "index.html"
+dist = "../dist"
+public_url = "/"
+
+[watch]
+ignore = ["../dist"]
+
+[serve]
+# Local dev: `trunk serve` hosts the UI and proxies API calls to the backend
+# (which runs separately, e.g. `cargo run` on port 8000).
+[[proxy]]
+rewrite = "/api"
+backend = "http://localhost:8000"
+[[proxy]]
+rewrite = "/health"
+backend = "http://localhost:8000"

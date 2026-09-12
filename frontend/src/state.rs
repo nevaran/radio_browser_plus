@@ -1,0 +1,536 @@
+//! Central reactive state: view routing, fetched data, auth, favorites.
+//!
+//! Data loading mirrors `renderCurrentView` from the old UI. Stale responses
+//! are discarded with a generation counter instead of `AbortController`.
+
+use std::collections::{HashMap, HashSet};
+
+use gloo_storage::{LocalStorage, Storage};
+use gloo_timers::future::TimeoutFuture;
+use leptos::prelude::*;
+
+use crate::api;
+use crate::models::{
+    favorite_to_station, station_id, CollectionItem, Country, Favorite, Language, Station, Tag,
+    User,
+};
+use crate::player::Player;
+use crate::utils::{normalize_view_name, sort_by_name_asc, station_sort_key};
+
+const VIEW_KEY: &str = "radio-browser-plus-last-view";
+const SEARCH_DEBOUNCE_MS: u32 = 300;
+pub const STATION_REFRESH_MS: u32 = 21_600_000; // 6 hours, as before
+
+#[derive(Clone)]
+pub struct AppState {
+    pub view: RwSignal<String>,
+    pub filter: RwSignal<Option<String>>,
+    pub search_query: RwSignal<String>,
+    pub stations: RwSignal<Vec<Station>>,
+    pub collections: RwSignal<Vec<CollectionItem>>,
+    pub collection_kind: RwSignal<String>,
+    pub view_title: RwSignal<String>,
+    pub favorites: RwSignal<HashMap<String, Favorite>>,
+    pub favorites_loaded: RwSignal<bool>,
+    pub metadata_refreshed: RwSignal<HashSet<String>>,
+    pub user: RwSignal<Option<User>>,
+    pub player: Player,
+    pub login_open: RwSignal<bool>,
+    pub create_user_open: RwSignal<bool>,
+    pub change_password_open: RwSignal<bool>,
+    pub sidebar_open: RwSignal<bool>,
+    pub compact_bar: RwSignal<bool>,
+    pub resize_tick: RwSignal<u64>,
+    view_gen: RwSignal<u64>,
+    search_gen: RwSignal<u64>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        let player = Player::new();
+        Self {
+            view: RwSignal::new("all".to_string()),
+            filter: RwSignal::new(None),
+            search_query: RwSignal::new(String::new()),
+            stations: RwSignal::new(Vec::new()),
+            collections: RwSignal::new(Vec::new()),
+            collection_kind: RwSignal::new(String::new()),
+            view_title: RwSignal::new("All stations".to_string()),
+            favorites: RwSignal::new(HashMap::new()),
+            favorites_loaded: RwSignal::new(false),
+            metadata_refreshed: RwSignal::new(HashSet::new()),
+            user: RwSignal::new(None),
+            player,
+            login_open: RwSignal::new(false),
+            create_user_open: RwSignal::new(false),
+            change_password_open: RwSignal::new(false),
+            sidebar_open: RwSignal::new(false),
+            compact_bar: RwSignal::new(false),
+            resize_tick: RwSignal::new(0),
+            view_gen: RwSignal::new(0),
+            search_gen: RwSignal::new(0),
+        }
+    }
+
+    // -- auth helpers ------------------------------------------------------
+
+    pub fn is_logged_in(&self) -> bool {
+        self.user.get().is_some()
+    }
+
+    pub fn is_admin(&self) -> bool {
+        self.user.get().is_some_and(|u| u.role == "admin")
+    }
+
+    pub fn alert(message: &str) {
+        if let Some(window) = web_sys::window() {
+            let _ = window.alert_with_message(message);
+        }
+    }
+
+    pub fn confirm(message: &str) -> bool {
+        web_sys::window()
+            .and_then(|w| w.confirm_with_message(message).ok())
+            .unwrap_or(false)
+    }
+
+    // -- favorites ---------------------------------------------------------
+
+    pub async fn ensure_favorites(&self) {
+        if self.favorites_loaded.get_untracked() || !self.is_logged_in() {
+            return;
+        }
+        match api::fetch_favorites().await {
+            Ok(resp) => {
+                self.favorites.set(resp.favorites);
+                self.favorites_loaded.set(true);
+            }
+            Err(e) => {
+                if e == "unauthorized" {
+                    self.user.set(None);
+                    self.favorites.set(HashMap::new());
+                    self.favorites_loaded.set(false);
+                    self.login_open.set(true);
+                }
+            }
+        }
+    }
+
+    pub fn is_favorite(&self, id: &str) -> bool {
+        self.favorites.get().contains_key(id)
+    }
+
+    pub fn toggle_favorite(&self, station: Station) {
+        let this = self.clone();
+        leptos::task::spawn_local(async move {
+            if !this.is_logged_in() {
+                this.login_open.set(true);
+                return;
+            }
+            let Some(id) = station_id(&station) else {
+                return;
+            };
+            if this.favorites.get_untracked().contains_key(&id)
+                && !Self::confirm(&format!("Remove \"{}\" from favorites?", station.name))
+            {
+                return;
+            }
+            let genre = crate::utils::station_genre(&station);
+            let genre = (genre != "Unknown genre").then_some(genre);
+            let Some(payload) = crate::models::FavoritePayload::from_station(&station, genre)
+            else {
+                return;
+            };
+            match api::toggle_favorite(&payload).await {
+                Ok(resp) => {
+                    this.favorites.set(resp.favorites);
+                    this.favorites_loaded.set(true);
+                    if this.view.get_untracked() == "favorites"
+                        && this.filter.get_untracked().is_none()
+                    {
+                        this.load_view();
+                    }
+                }
+                Err(e) => Self::alert(&e),
+            }
+        });
+    }
+
+    pub fn refresh_favorite_metadata(&self, station: Station) {
+        let this = self.clone();
+        leptos::task::spawn_local(async move {
+            let Some(id) = station_id(&station) else {
+                return;
+            };
+            if !this.favorites.get_untracked().contains_key(&id) {
+                return;
+            }
+            if this.metadata_refreshed.get_untracked().contains(&id) {
+                return;
+            }
+            this.metadata_refreshed.update(|s| {
+                s.insert(id.clone());
+            });
+            let Ok(live) = api::fetch_station_by_id(&id).await else {
+                return;
+            };
+            let genre = crate::utils::station_genre(&live);
+            if genre == "Unknown genre" {
+                return;
+            }
+            let payload = crate::models::FavoritePayload {
+                station_id: id.clone(),
+                name: live.name.clone(),
+                favicon: live.favicon.clone(),
+                url: live.url_resolved.clone().or_else(|| live.url.clone()),
+                url_resolved: live.url_resolved.clone().or_else(|| live.url.clone()),
+                country: live.country.clone(),
+                bitrate: live.bitrate,
+                genre: Some(genre),
+                tags: live.tags.clone(),
+            };
+            if let Ok(resp) = api::update_favorite(&payload).await {
+                this.favorites.set(resp.favorites);
+            }
+        });
+    }
+
+    // -- routing -----------------------------------------------------------
+
+    pub fn persist_view(&self, view: &str) {
+        let _ = LocalStorage::set(VIEW_KEY, view);
+    }
+
+    pub fn navigate(&self, view: &str, filter: Option<String>) {
+        let view = normalize_view_name(view);
+        let mut hash = format!("#{view}");
+        if let Some(f) = &filter {
+            if view != "all" {
+                hash.push('/');
+                hash.push_str(&percent_encode(f));
+            }
+        }
+        self.persist_view(&view);
+        if let Some(window) = web_sys::window() {
+            let current = window.location().hash().unwrap_or_default();
+            if current != hash {
+                let _ = window.location().set_hash(&hash);
+                return; // hashchange listener will load the view
+            }
+        }
+        // Hash unchanged (e.g. re-clicking the active nav): load directly.
+        self.view.set(view);
+        self.filter.set(filter);
+        self.load_view();
+    }
+
+    pub fn apply_hash(&self) {
+        let hash = web_sys::window()
+            .and_then(|w| w.location().hash().ok())
+            .unwrap_or_default();
+        let hash = hash.strip_prefix('#').unwrap_or("");
+        if hash.is_empty() {
+            let saved: String = LocalStorage::get(VIEW_KEY).unwrap_or_else(|_| "all".to_string());
+            self.view.set(normalize_view_name(&saved));
+            self.filter.set(None);
+            self.load_view();
+            return;
+        }
+        let mut parts = hash.splitn(2, '/');
+        let view = normalize_view_name(parts.next().unwrap_or(""));
+        let mut filter = parts.next().map(percent_decode).filter(|f| !f.is_empty());
+        if view == "all" {
+            filter = None;
+        }
+        self.view.set(view);
+        self.filter.set(filter);
+        self.load_view();
+    }
+
+    // -- data loading ------------------------------------------------------
+
+    /// Load the current view; stale in-flight responses are ignored.
+    pub fn load_view(&self) {
+        self.view_gen.update(|g| *g += 1);
+        let gen = self.view_gen.get_untracked();
+        let this = self.clone();
+        leptos::task::spawn_local(async move {
+            this.load_view_inner().await;
+            let _ = gen;
+        });
+    }
+
+    fn current_gen(&self, gen: u64) -> bool {
+        self.view_gen.get_untracked() == gen
+    }
+
+    async fn load_view_inner(&self) {
+        let gen = self.view_gen.get_untracked();
+        let view = self.view.get_untracked();
+        let filter = self.filter.get_untracked();
+
+        if view == "search" {
+            let query = self.search_query.get_untracked();
+            if query.trim().is_empty() {
+                self.view.set("popular".to_string());
+                self.load_view();
+                return;
+            }
+            match api::search_stations(&query).await {
+                Ok(stations) => {
+                    if self.current_gen(gen)
+                        && self.view.get_untracked() == "search"
+                        && self.search_query.get_untracked() == query
+                    {
+                        self.stations.set(stations);
+                        self.view_title.set(format!("Search: {query}"));
+                    }
+                }
+                Err(e) => web_sys::console::error_1(&e.into()),
+            }
+            return;
+        }
+
+        if let Some(filter_value) = filter {
+            let result = match view.as_str() {
+                "countries" => api::fetch_stations_by_country(&filter_value).await,
+                "languages" => api::fetch_stations_by_language(&filter_value).await,
+                "tags" | "genres" => api::fetch_stations_by_tag(&filter_value).await,
+                _ => Ok(Vec::new()),
+            };
+            match result {
+                Ok(mut stations) => {
+                    if view == "genres" {
+                        sort_by_name_asc(&mut stations, station_sort_key);
+                    }
+                    if self.current_gen(gen) && self.filter.get_untracked().is_some() {
+                        let title = match view.as_str() {
+                            "genres" => "Genres".to_string(),
+                            v => {
+                                let mut c = v.chars();
+                                format!("{}{}", c.next().unwrap_or('?').to_uppercase(), c.as_str())
+                            }
+                        };
+                        self.stations.set(stations);
+                        self.view_title.set(format!("{title}: {filter_value}"));
+                    }
+                }
+                Err(e) => web_sys::console::error_1(&e.into()),
+            }
+            return;
+        }
+
+        match view.as_str() {
+            "all" => match api::fetch_all_stations().await {
+                Ok(mut stations) => {
+                    sort_by_name_asc(&mut stations, station_sort_key);
+                    if self.current_gen(gen) && self.view.get_untracked() == "all" {
+                        self.stations.set(stations);
+                        self.view_title.set("All stations".to_string());
+                    }
+                }
+                Err(e) => web_sys::console::error_1(&e.into()),
+            },
+            "countries" => match api::fetch_countries().await {
+                Ok(items) => {
+                    if self.current_gen(gen) && self.view.get_untracked() == "countries" {
+                        self.collections.set(to_collection(items, "countries"));
+                        self.collection_kind.set("countries".to_string());
+                        self.view_title.set("Countries".to_string());
+                    }
+                }
+                Err(e) => web_sys::console::error_1(&e.into()),
+            },
+            "languages" => match api::fetch_languages().await {
+                Ok(items) => {
+                    if self.current_gen(gen) && self.view.get_untracked() == "languages" {
+                        self.collections.set(to_collection(items, "languages"));
+                        self.collection_kind.set("languages".to_string());
+                        self.view_title.set("Languages".to_string());
+                    }
+                }
+                Err(e) => web_sys::console::error_1(&e.into()),
+            },
+            "tags" | "genres" => match api::fetch_tags().await {
+                Ok(items) => {
+                    if self.current_gen(gen) {
+                        self.collections.set(to_collection(items, "genres"));
+                        self.collection_kind.set("genres".to_string());
+                        self.view_title.set("Genres".to_string());
+                    }
+                }
+                Err(e) => web_sys::console::error_1(&e.into()),
+            },
+            "favorites" => {
+                self.ensure_favorites().await;
+                if self.current_gen(gen) && self.view.get_untracked() == "favorites" {
+                    let mut stations: Vec<Station> = self
+                        .favorites
+                        .get_untracked()
+                        .iter()
+                        .map(|(id, fav)| favorite_to_station(id, fav))
+                        .collect();
+                    sort_by_name_asc(&mut stations, station_sort_key);
+                    self.stations.set(stations);
+                    self.view_title.set("Favorites".to_string());
+                }
+            }
+            _ => match api::fetch_popular().await {
+                Ok(stations) => {
+                    if self.current_gen(gen) {
+                        self.stations.set(stations);
+                        self.view_title.set("Popular".to_string());
+                    }
+                }
+                Err(e) => web_sys::console::error_1(&e.into()),
+            },
+        }
+    }
+
+    // -- search ------------------------------------------------------------
+
+    pub fn apply_search(&self, query: String) {
+        let trimmed = query.trim().to_string();
+        self.search_query.set(trimmed.clone());
+        if trimmed.is_empty() {
+            self.view.set("popular".to_string());
+            self.view_title.set("Popular".to_string());
+            self.load_view();
+            return;
+        }
+        self.view.set("search".to_string());
+        self.search_gen.update(|g| *g += 1);
+        let gen = self.search_gen.get_untracked();
+        let this = self.clone();
+        leptos::task::spawn_local(async move {
+            TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
+            if this.search_gen.get_untracked() != gen {
+                return;
+            }
+            match api::search_stations(&trimmed).await {
+                Ok(stations) => {
+                    if this.view.get_untracked() == "search"
+                        && this.search_query.get_untracked() == trimmed
+                    {
+                        this.stations.set(stations);
+                        this.view_title.set(format!("Search: {trimmed}"));
+                    }
+                }
+                Err(e) => web_sys::console::error_1(&e.into()),
+            }
+        });
+    }
+}
+
+trait CollectionRow {
+    fn label(&self) -> String;
+    fn count(&self) -> Option<u32>;
+    fn iso(&self) -> Option<String>;
+}
+
+impl CollectionRow for Country {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+    fn count(&self) -> Option<u32> {
+        self.stationcount
+    }
+    fn iso(&self) -> Option<String> {
+        self.iso_3166_1.clone()
+    }
+}
+
+impl CollectionRow for Language {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+    fn count(&self) -> Option<u32> {
+        self.stationcount
+    }
+    fn iso(&self) -> Option<String> {
+        None
+    }
+}
+
+impl CollectionRow for Tag {
+    fn label(&self) -> String {
+        self.name.clone()
+    }
+    fn count(&self) -> Option<u32> {
+        self.stationcount
+    }
+    fn iso(&self) -> Option<String> {
+        None
+    }
+}
+
+fn to_collection<T: CollectionRow>(mut items: Vec<T>, kind: &str) -> Vec<CollectionItem> {
+    sort_by_name_asc(&mut items, |i| i.label());
+    items
+        .into_iter()
+        .map(|item| {
+            let label = if item.label().trim().is_empty() {
+                "Unknown".to_string()
+            } else {
+                item.label()
+            };
+            let icon_url = if kind == "countries" {
+                item.iso()
+                    .map(|iso| format!("/flags/{}.svg", iso.to_lowercase()))
+                    .unwrap_or_else(|| crate::utils::PLACEHOLDER_SVG.to_string())
+            } else {
+                crate::utils::PLACEHOLDER_SVG.to_string()
+            };
+            CollectionItem {
+                filter_value: label.clone(),
+                label,
+                count: item.count(),
+                icon_url,
+            }
+        })
+        .collect()
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(h << 4 | l);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}

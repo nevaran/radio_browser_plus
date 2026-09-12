@@ -296,6 +296,48 @@ button, input {
   cursor: pointer;
 }
 
+/* In-app dialog (replaces alert()/confirm()). Stacks above the auth modals
+   so error feedback stays visible even with the login dialog open. */
+.app-dialog {
+  z-index: 1100;
+}
+
+.dialog-message {
+  color: var(--text);
+  line-height: 1.5;
+  margin: 0 0 1.25rem;
+  overflow-wrap: anywhere;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.dialog-actions .primary-button,
+.dialog-actions .secondary-button {
+  flex: 1;
+}
+
+.secondary-button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 10px;
+  font-weight: 600;
+  padding: 0.8rem 0.9rem;
+  cursor: pointer;
+}
+
+.secondary-button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.primary-button.danger {
+  background: #ef4444;
+  color: #fff;
+}
+
 .station-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

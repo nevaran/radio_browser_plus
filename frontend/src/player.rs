@@ -4,6 +4,10 @@
 //! `isPlaying` *before* checking it, so its retry chain could never run. Here
 //! a dedicated `wants_playing` flag tracks playback intent, so the configured
 //! 5 × 3s retry chain actually works.
+//!
+//! Station switches are gapless: the previous stream keeps playing until the
+//! new one fires its first `playing` event, and `is_playing` stays true
+//! throughout, so there is neither a silence gap nor a play-button flicker.
 
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +34,11 @@ pub struct Player {
     pub muted: RwSignal<bool>,
     wants_playing: RwSignal<bool>,
     audio: Arc<Mutex<Option<HtmlAudioElement>>>,
+    /// Element parked for gapless handoff: the previously-live stream, kept
+    /// sounding until the newly adopted one proves itself. Always `None`
+    /// outside the brief switch window; every path that can observe it
+    /// (`play`, `pause`, first `play`/`error` of the new element) drains it.
+    previous: Arc<Mutex<Option<HtmlAudioElement>>>,
     retry_attempt: Arc<Mutex<u32>>,
     retry_gen: Arc<Mutex<u64>>,
 }
@@ -46,6 +55,7 @@ impl Player {
             muted: RwSignal::new(muted),
             wants_playing: RwSignal::new(false),
             audio: Arc::new(Mutex::new(None)),
+            previous: Arc::new(Mutex::new(None)),
             retry_attempt: Arc::new(Mutex::new(0)),
             retry_gen: Arc::new(Mutex::new(0)),
         }
@@ -56,25 +66,41 @@ impl Player {
         *self.retry_attempt.lock().unwrap() = 0;
     }
 
+    /// Detach an element's handlers so its late events can no longer touch
+    /// player state. A parked element stays dumb but audible until teardown.
+    fn detach(audio: &HtmlAudioElement) {
+        audio.set_onplay(None);
+        audio.set_onpause(None);
+        audio.set_onended(None);
+        audio.set_onwaiting(None);
+        audio.set_oncanplay(None);
+        audio.set_onerror(None);
+    }
+
+    /// Detach handlers, stop, and release an element.
+    fn silence(audio: &HtmlAudioElement) {
+        Self::detach(audio);
+        let _ = audio.pause();
+        audio.set_src("");
+    }
+
+    /// Drain a parked handoff element, silencing it if still present.
+    /// `Option::take` makes this a one-shot: only the first caller wins.
+    fn teardown_previous(&self) {
+        if let Some(prev) = self.previous.lock().unwrap().take() {
+            Self::silence(&prev);
+        }
+    }
+
     pub fn play(&self, station: Station) {
         self.cancel_retry();
-        self.loading.set(true);
-
-        if let Some(old) = self.audio.lock().unwrap().as_ref() {
-            let _ = old.pause();
-            old.set_src("");
-        }
 
         let Some(stream) = station_stream_url(&station) else {
-            self.loading.set(false);
             return;
         };
         let audio = match HtmlAudioElement::new_with_src(&stream) {
             Ok(a) => a,
-            Err(_) => {
-                self.loading.set(false);
-                return;
-            }
+            Err(_) => return,
         };
         audio.set_volume(if self.muted.get_untracked() {
             0.0
@@ -82,10 +108,24 @@ impl Player {
             self.volume.get_untracked()
         });
 
+        // Park the live element instead of stopping it: it keeps sounding
+        // until the new stream's first `playing` event completes the handoff
+        // (or its first error aborts into the retry path). Its handlers are
+        // detached up front so nothing it does meanwhile (e.g. ending
+        // naturally mid-handoff) can corrupt player state.
+        self.teardown_previous();
+        let live = self.audio.lock().unwrap().replace(audio.clone());
+        if let Some(ref prev) = live {
+            Self::detach(prev);
+        }
+        *self.previous.lock().unwrap() = live;
+
         self.current.set(Some(station.clone()));
         self.wants_playing.set(true);
+        // Stays true across the switch: audio never stops in the success
+        // case, so the button must not flicker to "not playing".
         self.is_playing.set(true);
-        *self.audio.lock().unwrap() = Some(audio.clone());
+        self.loading.set(true);
         self.attach_handlers(&audio);
 
         let this = self.clone();
@@ -95,6 +135,7 @@ impl Player {
                 Err(_) => true,
             };
             if failed {
+                this.teardown_previous();
                 this.is_playing.set(false);
                 this.schedule_retry();
             }
@@ -104,7 +145,14 @@ impl Player {
     fn attach_handlers(&self, audio: &HtmlAudioElement) {
         let this = self.clone();
         let on_play = Closure::wrap(Box::new(move || {
-            this.is_playing.set(true);
+            // First `playing` of a fresh element completes any pending
+            // handoff; later ones (e.g. after resume) find nothing to do.
+            this.teardown_previous();
+            // Guarded: a pause issued while buffering must win over the
+            // still-resolving play promise.
+            if this.wants_playing.get_untracked() {
+                this.is_playing.set(true);
+            }
             this.loading.set(false);
         }) as Box<dyn Fn()>);
         audio.set_onplay(Some(on_play.as_ref().unchecked_ref()));
@@ -143,6 +191,10 @@ impl Player {
 
         let this = self.clone();
         let on_error = Closure::wrap(Box::new(move || {
+            // Abort a pending handoff: the parked element must not keep
+            // sounding behind a failed switch, and the retry path below takes
+            // over the adopted element.
+            this.teardown_previous();
             this.is_playing.set(false);
             this.schedule_retry();
         }) as Box<dyn Fn()>);
@@ -198,6 +250,9 @@ impl Player {
 
     pub fn pause(&self) {
         self.cancel_retry();
+        // Also stop a parked handoff element, otherwise it would keep
+        // sounding with no remaining handle on it.
+        self.teardown_previous();
         self.wants_playing.set(false);
         self.loading.set(false);
         if let Some(audio) = self.audio.lock().unwrap().as_ref() {

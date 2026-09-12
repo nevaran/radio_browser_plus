@@ -86,7 +86,7 @@ pub fn LoginModal() -> impl IntoView {
                                             s.ensure_favorites().await;
                                             s.load_view();
                                         }
-                                        Err(e) => AppState::alert(&e),
+                                        Err(e) => s.show_alert("Sign in", e),
                                     }
                                 });
                             });
@@ -185,13 +185,14 @@ pub fn CreateUserModal() -> impl IntoView {
                                     {
                                         Ok(_) => {
                                             s.create_user_open.set(false);
-                                            AppState::alert(
-                                                &format!(
+                                            s.show_alert(
+                                                "Create User",
+                                                format!(
                                                     "User \"{username}\" created successfully."
                                                 ),
                                             );
                                         }
-                                        Err(e) => AppState::alert(&e),
+                                        Err(e) => s.show_alert("Create User", e),
                                     }
                                 });
                             });
@@ -284,9 +285,12 @@ pub fn ChangePasswordModal() -> impl IntoView {
                                     match crate::api::change_password(&old, &new).await {
                                         Ok(_) => {
                                             s.change_password_open.set(false);
-                                            AppState::alert("Password updated successfully.");
+                                            s.show_alert(
+                                                "Change Password",
+                                                "Password updated successfully.",
+                                            );
                                         }
-                                        Err(e) => AppState::alert(&e),
+                                        Err(e) => s.show_alert("Change Password", e),
                                     }
                                 });
                             });

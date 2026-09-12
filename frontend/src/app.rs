@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use wasm_bindgen::{closure::Closure, JsCast};
 
 use crate::components::{
-    ChangePasswordModal, CollectionGrid, CreateUserModal, LoginModal, NowPlaying, Sidebar,
+    ChangePasswordModal, CollectionGrid, CreateUserModal, Dialog, LoginModal, NowPlaying, Sidebar,
     StationGrid,
 };
 use crate::state::{AppState, STATION_REFRESH_MS};
@@ -55,6 +55,7 @@ pub fn App() -> impl IntoView {
         <LoginModal />
         <CreateUserModal />
         <ChangePasswordModal />
+        <Dialog />
     }
 }
 

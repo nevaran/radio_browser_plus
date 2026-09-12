@@ -21,6 +21,28 @@ const VIEW_KEY: &str = "radio-browser-plus-last-view";
 const SEARCH_DEBOUNCE_MS: u32 = 300;
 pub const STATION_REFRESH_MS: u32 = 21_600_000; // 6 hours, as before
 
+/// Action confirmed through the in-app confirm dialog. An enum (rather than a
+/// stored closure) keeps the dialog signal `Send + Sync` for view closures.
+#[derive(Clone)]
+pub enum DialogAction {
+    RemoveFavorite { station_id: String },
+}
+
+/// In-app modal dialog, replacing the browser's `alert()`/`confirm()`.
+#[derive(Clone)]
+pub enum AppDialog {
+    Alert {
+        title: String,
+        message: String,
+    },
+    Confirm {
+        title: String,
+        message: String,
+        confirm_label: String,
+        action: DialogAction,
+    },
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub view: RwSignal<String>,
@@ -38,6 +60,8 @@ pub struct AppState {
     /// resolved. Until then `user == None` means "unknown", not "logged out",
     /// and must not trigger the login gate.
     pub session_checked: RwSignal<bool>,
+    /// Currently open in-app dialog, if any (replaces `alert`/`confirm`).
+    pub dialog: RwSignal<Option<AppDialog>>,
     pub player: Player,
     pub login_open: RwSignal<bool>,
     pub create_user_open: RwSignal<bool>,
@@ -65,6 +89,7 @@ impl AppState {
             metadata_refreshed: RwSignal::new(HashSet::new()),
             user: RwSignal::new(None),
             session_checked: RwSignal::new(false),
+            dialog: RwSignal::new(None),
             player,
             login_open: RwSignal::new(false),
             create_user_open: RwSignal::new(false),
@@ -109,16 +134,47 @@ impl AppState {
         }
     }
 
-    pub fn alert(message: &str) {
-        if let Some(window) = web_sys::window() {
-            let _ = window.alert_with_message(message);
-        }
+    pub fn show_alert(&self, title: impl Into<String>, message: impl Into<String>) {
+        self.dialog.set(Some(AppDialog::Alert {
+            title: title.into(),
+            message: message.into(),
+        }));
     }
 
-    pub fn confirm(message: &str) -> bool {
-        web_sys::window()
-            .and_then(|w| w.confirm_with_message(message).ok())
-            .unwrap_or(false)
+    pub fn close_dialog(&self) {
+        self.dialog.set(None);
+    }
+
+    fn show_confirm_remove_favorite(&self, station_id: String, station_name: &str) {
+        self.dialog.set(Some(AppDialog::Confirm {
+            title: "Remove favorite".to_string(),
+            message: format!("Remove \"{station_name}\" from favorites?"),
+            confirm_label: "Remove".to_string(),
+            action: DialogAction::RemoveFavorite { station_id },
+        }));
+    }
+
+    /// Runs the confirmed dialog action, then closes the dialog.
+    pub fn confirm_dialog(&self) {
+        let Some(AppDialog::Confirm { action, .. }) = self.dialog.get_untracked() else {
+            return;
+        };
+        self.dialog.set(None);
+        match action {
+            DialogAction::RemoveFavorite { station_id: id } => {
+                let station = self
+                    .stations
+                    .get_untracked()
+                    .into_iter()
+                    .find(|s| station_id(s).as_deref() == Some(id.as_str()));
+                if let Some(station) = station {
+                    let this = self.clone();
+                    leptos::task::spawn_local(async move {
+                        this.toggle_favorite_now(station).await;
+                    });
+                }
+            }
+        }
     }
 
     // -- favorites ---------------------------------------------------------
@@ -145,45 +201,48 @@ impl AppState {
     }
 
     pub fn toggle_favorite(&self, station: Station) {
+        if !self.is_logged_in() {
+            self.login_open.set(true);
+            return;
+        }
+        let Some(id) = station_id(&station) else {
+            return;
+        };
+        if self.favorites.get_untracked().contains_key(&id) {
+            // Removal needs confirmation; the in-app dialog continues in
+            // `confirm_dialog` once the user confirms.
+            self.show_confirm_remove_favorite(id, &station.name);
+            return;
+        }
         let this = self.clone();
         leptos::task::spawn_local(async move {
-            if !this.is_logged_in() {
-                this.login_open.set(true);
-                return;
-            }
-            let Some(id) = station_id(&station) else {
-                return;
-            };
-            if this.favorites.get_untracked().contains_key(&id)
-                && !Self::confirm(&format!("Remove \"{}\" from favorites?", station.name))
-            {
-                return;
-            }
-            let genre = crate::utils::station_genre(&station);
-            let genre = (genre != "Unknown genre").then_some(genre);
-            let Some(payload) = crate::models::FavoritePayload::from_station(&station, genre)
-            else {
-                return;
-            };
-            match api::toggle_favorite(&payload).await {
-                Ok(resp) => {
-                    this.favorites.set(resp.favorites);
-                    this.favorites_loaded.set(true);
-                    if this.view.get_untracked() == "favorites"
-                        && this.filter.get_untracked().is_none()
-                    {
-                        this.load_view();
-                    }
-                }
-                Err(e) => {
-                    if e == "unauthorized" {
-                        this.handle_unauthorized();
-                    } else {
-                        Self::alert(&e);
-                    }
-                }
-            }
+            this.toggle_favorite_now(station).await;
         });
+    }
+
+    async fn toggle_favorite_now(&self, station: Station) {
+        let genre = crate::utils::station_genre(&station);
+        let genre = (genre != "Unknown genre").then_some(genre);
+        let Some(payload) = crate::models::FavoritePayload::from_station(&station, genre) else {
+            return;
+        };
+        match api::toggle_favorite(&payload).await {
+            Ok(resp) => {
+                self.favorites.set(resp.favorites);
+                self.favorites_loaded.set(true);
+                if self.view.get_untracked() == "favorites" && self.filter.get_untracked().is_none()
+                {
+                    self.load_view();
+                }
+            }
+            Err(e) => {
+                if e == "unauthorized" {
+                    self.handle_unauthorized();
+                } else {
+                    self.show_alert("Favorites", e);
+                }
+            }
+        }
     }
 
     pub fn refresh_favorite_metadata(&self, station: Station) {

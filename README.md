@@ -55,7 +55,7 @@ Requirements:
 - Rust 1.98+
 - Cargo
 - For frontend work: the `wasm32-unknown-unknown` target and
-  [Trunk](https://trunkrs.dev/) (`rustup target add wasm32-unknown-unknown`
+  Trunk(`rustup target add wasm32-unknown-unknown`
   and `cargo install trunk --locked`)
 
 The repo is a Cargo workspace (backend + `frontend/` members) with a single

@@ -63,20 +63,27 @@ fn init_app(state: AppState) {
     update_viewport_safe_area();
     state.apply_hash();
 
-    // Restore session (silent — the login dialog only appears when an action
-    // needs authentication, same as the previous UI).
+    // Restore session. Without one the backend rejects every data request,
+    // so a failed restore locks the UI behind the login dialog; a restored
+    // session always (re)loads the view because the initial load is skipped
+    // while logged out.
     {
         let state = state.clone();
         leptos::task::spawn_local(async move {
             match crate::api::fetch_me().await {
                 Ok(user) => {
+                    state.session_checked.set(true);
                     state.user.set(Some(user));
                     state.ensure_favorites().await;
-                    if state.view.get_untracked() == "favorites" {
-                        state.load_view();
+                    state.load_view();
+                }
+                // A login submitted while the restore was in flight wins:
+                // never wipe an established session with a stale failure.
+                Err(_) => {
+                    if !state.is_logged_in() {
+                        state.handle_unauthorized();
                     }
                 }
-                Err(_) => state.user.set(None),
             }
         });
     }
@@ -88,7 +95,7 @@ fn init_app(state: AppState) {
             state.apply_hash();
         }) as Box<dyn Fn()>);
         if let Some(window) = web_sys::window() {
-            let _ = window.set_onhashchange(Some(on_hash.as_ref().unchecked_ref()));
+            window.set_onhashchange(Some(on_hash.as_ref().unchecked_ref()));
         }
         on_hash.forget();
     }

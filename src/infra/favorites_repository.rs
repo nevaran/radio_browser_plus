@@ -17,11 +17,20 @@ impl FavoritesRepository {
     /// Create a new repository with file path
     pub async fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        
-        // Ensure parent directory exists
+
+        // Ensure parent directory exists with owner-only access
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).await?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(err) =
+                        fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await
+                    {
+                        tracing::warn!(path = %parent.display(), error = %err, "Failed to restrict directory permissions");
+                    }
+                }
             }
         }
 
@@ -71,28 +80,27 @@ impl FavoritesRepository {
         cache.is_favorite(station_id)
     }
 
-    /// Get a specific favorite
-    pub async fn get(&self, station_id: &str) -> Result<Option<Favorite>> {
+    /// Number of saved favorites
+    pub async fn count(&self) -> usize {
         let cache = self.cache.read().await;
-        Ok(cache.get(station_id).cloned())
+        cache.as_map().len()
     }
 
-    // Private helper to write to disk
+    // Private helper to write to disk atomically: write to a temp file, then
+    // rename over the target, so a crash can never leave a truncated
+    // favorites file behind (which would otherwise load back as empty).
     async fn write_to_file(path: &PathBuf, data: &FavoritesData) -> Result<()> {
         debug!("Persisting favorites to {}", path.display());
         let content = serde_json::to_string_pretty(&data.as_map())?;
-        fs::write(path, content).await?;
-        Ok(())
-    }
-
-    /// Reload from disk (useful after external changes)
-    pub async fn reload(&self) -> Result<()> {
-        if self.path.exists() {
-            debug!("Reloading favorites from disk");
-            let content = fs::read_to_string(&self.path).await?;
-            let data: FavoritesData = serde_json::from_str(&content).unwrap_or_default();
-            let mut cache = self.cache.write().await;
-            *cache = data;
+        let tmp_path = path.with_extension("json.tmp");
+        if let Err(err) = fs::write(&tmp_path, content).await {
+            tracing::warn!(path = %tmp_path.display(), error = %err, "Failed to write favorites file");
+            return Err(err.into());
+        }
+        if let Err(err) = fs::rename(&tmp_path, path).await {
+            tracing::warn!(path = %path.display(), error = %err, "Failed to persist favorites file");
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(err.into());
         }
         Ok(())
     }

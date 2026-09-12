@@ -1,10 +1,10 @@
 // Feature modules
-pub mod stations;
-pub mod favorites;
 pub mod collections;
+pub mod favorites;
 pub mod health;
+pub mod stations;
 
-pub use stations::StationsHandlers;
-pub use favorites::FavoritesHandlers;
 pub use collections::CollectionsHandlers;
+pub use favorites::FavoritesHandlers;
 pub use health::HealthHandlers;
+pub use stations::StationsHandlers;

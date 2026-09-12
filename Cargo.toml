@@ -13,7 +13,7 @@ path = "src/main.rs"
 # Web framework and async runtime
 axum = { version = "0.8", features = ["json", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "net"] }
-tower-http = { version = "0.7", features = ["fs"] }
+tower-http = { version = "0.7", features = ["fs", "limit", "timeout", "set-header"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

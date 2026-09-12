@@ -14,7 +14,8 @@ impl RadioBrowserClient {
     pub fn new(base_url: Option<String>) -> Self {
         Self {
             client: Client::new(),
-            base_url: base_url.unwrap_or_else(|| "https://de1.api.radio-browser.info/json".to_string()),
+            base_url: base_url
+                .unwrap_or_else(|| "https://de1.api.radio-browser.info/json".to_string()),
         }
     }
 
@@ -65,7 +66,11 @@ impl RadioBrowserClient {
     }
 
     /// Get stations by language
-    pub async fn get_stations_by_language(&self, language: &str, limit: u32) -> Result<Vec<Station>> {
+    pub async fn get_stations_by_language(
+        &self,
+        language: &str,
+        limit: u32,
+    ) -> Result<Vec<Station>> {
         debug!("Fetching stations for language: {}", language);
         let url = format!(
             "{}/stations/bylanguage/{}?hidebroken=true{}",
@@ -93,7 +98,8 @@ impl RadioBrowserClient {
         debug!("Fetching station with id: {}", station_id);
         let url = format!(
             "{}/stations/byuuid/{}?hidebroken=true",
-            self.base_url, station_id
+            self.base_url,
+            urlencoding::encode(station_id)
         );
         let stations: Vec<Station> = self.fetch_json_array(&url).await?;
         stations
@@ -124,10 +130,7 @@ impl RadioBrowserClient {
     }
 
     // Private helper method
-    async fn fetch_json_array<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-    ) -> Result<Vec<T>> {
+    async fn fetch_json_array<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<Vec<T>> {
         let response = self
             .client
             .get(url)
@@ -142,14 +145,41 @@ impl RadioBrowserClient {
             )));
         }
 
-        let body_text = response.text().await?;
-        
-        let data = serde_json::from_str::<Vec<T>>(&body_text)
-            .map_err(|e| {
-                tracing::error!("Failed to deserialize response: {}", e);
-                AppError::SerializationError(e)
-            })?;
+        let body_text = Self::read_capped_text(response).await?;
+
+        let data = serde_json::from_str::<Vec<T>>(&body_text).map_err(|e| {
+            tracing::error!("Failed to deserialize response: {}", e);
+            AppError::SerializationError(e)
+        })?;
         Ok(data)
+    }
+
+    /// Read a response body with an upper bound so a misbehaving upstream
+    /// cannot exhaust server memory, no matter the Content-Length it claims.
+    async fn read_capped_text(response: reqwest::Response) -> Result<String> {
+        /// Max accepted upstream body: comfortably above the largest capped
+        /// station list, far below memory-exhaustion territory.
+        const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+        if let Some(len) = response.content_length() {
+            if len > MAX_BODY_BYTES as u64 {
+                return Err(AppError::ExternalServiceError(format!(
+                    "Radio browser API response too large: {len} bytes"
+                )));
+            }
+        }
+        let mut response = response;
+        let mut buf = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if buf.len() + chunk.len() > MAX_BODY_BYTES {
+                return Err(AppError::ExternalServiceError(
+                    "Radio browser API response too large".to_string(),
+                ));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        String::from_utf8(buf).map_err(|e| {
+            AppError::ExternalServiceError(format!("Radio browser API returned invalid UTF-8: {e}"))
+        })
     }
 }
 

@@ -56,7 +56,10 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Serialization error: {}", err),
             ),
-            Self::IoError(err) => (StatusCode::INTERNAL_SERVER_ERROR, format!("IO error: {}", err)),
+            Self::IoError(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("IO error: {}", err),
+            ),
             Self::ReqwestError(err) => (
                 StatusCode::BAD_GATEWAY,
                 format!("External API error: {}", err),

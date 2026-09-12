@@ -48,7 +48,9 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
-        serde_json::Value::Number(value) => Ok(value.as_u64().and_then(|value| u32::try_from(value).ok())),
+        serde_json::Value::Number(value) => {
+            Ok(value.as_u64().and_then(|value| u32::try_from(value).ok()))
+        }
         serde_json::Value::String(value) => Ok(value.parse().ok()),
         serde_json::Value::Null => Ok(None),
         _ => Ok(None),
@@ -179,10 +181,6 @@ impl FavoritesData {
     pub fn as_map(&self) -> &HashMap<String, Favorite> {
         &self.favorites
     }
-
-    pub fn as_map_mut(&mut self) -> &mut HashMap<String, Favorite> {
-        &mut self.favorites
-    }
 }
 
 /// Toggle favorite request payload
@@ -235,20 +233,6 @@ impl HealthResponse {
     pub fn ok() -> Self {
         Self {
             status: "ok".to_string(),
-        }
-    }
-}
-
-/// API error response
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ErrorResponse {
-    pub error: String,
-}
-
-impl ErrorResponse {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            error: message.into(),
         }
     }
 }

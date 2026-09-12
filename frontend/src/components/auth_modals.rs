@@ -8,14 +8,24 @@ use leptos::prelude::*;
 
 use crate::state::AppState;
 
-fn close_button(target: &'static str, open: RwSignal<bool>) -> impl IntoView {
+/// Modal dismissal is blocked while logged out so the login dialog cannot be
+/// bypassed: no session means no usable app.
+fn close_button(
+    target: &'static str,
+    open: RwSignal<bool>,
+    user: RwSignal<Option<crate::models::User>>,
+) -> impl IntoView {
     view! {
         <button
             type="button"
             class="auth-close"
             data-close=target
             aria-label="Close"
-            on:click=move |_| open.set(false)
+            on:click=move |_| {
+                if user.with(|u| u.is_some()) {
+                    open.set(false);
+                }
+            }
         >
             "×"
         </button>
@@ -27,13 +37,21 @@ pub fn LoginModal() -> impl IntoView {
     let st = use_context::<AppState>().expect("AppState provided");
     let store = StoredValue::new(st.clone());
     let login_open = st.login_open;
+    let user = st.user;
     let user_ref = NodeRef::<Input>::new();
     let pass_ref = NodeRef::<Input>::new();
 
     view! {
         <Show when=move || login_open.get()>
             <div id="login-modal" class="auth-modal" aria-hidden="false">
-                <div class="auth-modal-backdrop" on:click=move |_| login_open.set(false)></div>
+                <div
+                    class="auth-modal-backdrop"
+                    on:click=move |_| {
+                        if user.with(|u| u.is_some()) {
+                            login_open.set(false);
+                        }
+                    }
+                ></div>
                 <div
                     class="auth-modal-content"
                     role="dialog"
@@ -42,7 +60,7 @@ pub fn LoginModal() -> impl IntoView {
                 >
                     <div class="auth-modal-header">
                         <h3 id="login-modal-title">"Sign in"</h3>
-                        {close_button("login-modal", login_open)}
+                        {close_button("login-modal", login_open, user)}
                     </div>
                     <form
                         id="login-form"
@@ -62,6 +80,7 @@ pub fn LoginModal() -> impl IntoView {
                                 leptos::task::spawn_local(async move {
                                     match crate::api::login(&username, &password).await {
                                         Ok(user) => {
+                                            s.session_checked.set(true);
                                             s.user.set(Some(user));
                                             s.login_open.set(false);
                                             s.ensure_favorites().await;
@@ -121,7 +140,11 @@ pub fn CreateUserModal() -> impl IntoView {
             <div id="create-user-modal" class="auth-modal" aria-hidden="false">
                 <div
                     class="auth-modal-backdrop"
-                    on:click=move |_| create_user_open.set(false)
+                    on:click=move |_| {
+                        if user.with(|u| u.is_some()) {
+                            create_user_open.set(false);
+                        }
+                    }
                 ></div>
                 <div
                     class="auth-modal-content"
@@ -131,7 +154,7 @@ pub fn CreateUserModal() -> impl IntoView {
                 >
                     <div class="auth-modal-header">
                         <h3 id="create-user-modal-title">"Create User"</h3>
-                        {close_button("create-user-modal", create_user_open)}
+                        {close_button("create-user-modal", create_user_open, user)}
                     </div>
                     <form
                         id="create-user-form"
@@ -225,7 +248,11 @@ pub fn ChangePasswordModal() -> impl IntoView {
             <div id="change-password-modal" class="auth-modal" aria-hidden="false">
                 <div
                     class="auth-modal-backdrop"
-                    on:click=move |_| change_password_open.set(false)
+                    on:click=move |_| {
+                        if user.with(|u| u.is_some()) {
+                            change_password_open.set(false);
+                        }
+                    }
                 ></div>
                 <div
                     class="auth-modal-content"
@@ -235,7 +262,7 @@ pub fn ChangePasswordModal() -> impl IntoView {
                 >
                     <div class="auth-modal-header">
                         <h3 id="change-password-modal-title">"Change Password"</h3>
-                        {close_button("change-password-modal", change_password_open)}
+                        {close_button("change-password-modal", change_password_open, user)}
                     </div>
                     <form
                         id="change-password-form"

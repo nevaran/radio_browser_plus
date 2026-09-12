@@ -34,6 +34,10 @@ pub struct AppState {
     pub favorites_loaded: RwSignal<bool>,
     pub metadata_refreshed: RwSignal<HashSet<String>>,
     pub user: RwSignal<Option<User>>,
+    /// True once the initial session restore (`/api/me` at startup) has
+    /// resolved. Until then `user == None` means "unknown", not "logged out",
+    /// and must not trigger the login gate.
+    pub session_checked: RwSignal<bool>,
     pub player: Player,
     pub login_open: RwSignal<bool>,
     pub create_user_open: RwSignal<bool>,
@@ -60,6 +64,7 @@ impl AppState {
             favorites_loaded: RwSignal::new(false),
             metadata_refreshed: RwSignal::new(HashSet::new()),
             user: RwSignal::new(None),
+            session_checked: RwSignal::new(false),
             player,
             login_open: RwSignal::new(false),
             create_user_open: RwSignal::new(false),
@@ -80,6 +85,28 @@ impl AppState {
 
     pub fn is_admin(&self) -> bool {
         self.user.get().is_some_and(|u| u.role == "admin")
+    }
+
+    /// Central handler for authentication loss (rejected session, expiry):
+    /// drop local identity and block the UI behind the login dialog.
+    pub fn handle_unauthorized(&self) {
+        self.session_checked.set(true);
+        self.user.set(None);
+        self.favorites.set(Default::default());
+        self.favorites_loaded.set(false);
+        self.stations.set(Vec::new());
+        self.collections.set(Vec::new());
+        self.login_open.set(true);
+    }
+
+    /// Route API failures: an auth rejection locks the UI, anything else is
+    /// only logged (the backend already clamps/validates inputs).
+    fn api_failed(&self, error: String) {
+        if error == "unauthorized" {
+            self.handle_unauthorized();
+        } else {
+            web_sys::console::error_1(&error.into());
+        }
     }
 
     pub fn alert(message: &str) {
@@ -107,10 +134,7 @@ impl AppState {
             }
             Err(e) => {
                 if e == "unauthorized" {
-                    self.user.set(None);
-                    self.favorites.set(HashMap::new());
-                    self.favorites_loaded.set(false);
-                    self.login_open.set(true);
+                    self.handle_unauthorized();
                 }
             }
         }
@@ -151,7 +175,13 @@ impl AppState {
                         this.load_view();
                     }
                 }
-                Err(e) => Self::alert(&e),
+                Err(e) => {
+                    if e == "unauthorized" {
+                        this.handle_unauthorized();
+                    } else {
+                        Self::alert(&e);
+                    }
+                }
             }
         });
     }
@@ -171,8 +201,12 @@ impl AppState {
             this.metadata_refreshed.update(|s| {
                 s.insert(id.clone());
             });
-            let Ok(live) = api::fetch_station_by_id(&id).await else {
-                return;
+            let live = match api::fetch_station_by_id(&id).await {
+                Ok(live) => live,
+                Err(e) => {
+                    this.api_failed(e);
+                    return;
+                }
             };
             let genre = crate::utils::station_genre(&live);
             if genre == "Unknown genre" {
@@ -250,7 +284,21 @@ impl AppState {
     // -- data loading ------------------------------------------------------
 
     /// Load the current view; stale in-flight responses are ignored.
+    /// Without a session there is nothing to load: the backend rejects every
+    /// data request, so clear the grids instead of firing doomed fetches.
+    /// While the session restore is still in flight the login state is
+    /// unknown, so skip quietly (the restore triggers a load when done)
+    /// instead of flashing the login dialog on every page load.
     pub fn load_view(&self) {
+        if !self.session_checked.get_untracked() {
+            return;
+        }
+        if !self.is_logged_in() {
+            self.stations.set(Vec::new());
+            self.collections.set(Vec::new());
+            self.login_open.set(true);
+            return;
+        }
         self.view_gen.update(|g| *g += 1);
         let gen = self.view_gen.get_untracked();
         let this = self.clone();
@@ -286,7 +334,7 @@ impl AppState {
                         self.view_title.set(format!("Search: {query}"));
                     }
                 }
-                Err(e) => web_sys::console::error_1(&e.into()),
+                Err(e) => self.api_failed(e),
             }
             return;
         }
@@ -315,7 +363,7 @@ impl AppState {
                         self.view_title.set(format!("{title}: {filter_value}"));
                     }
                 }
-                Err(e) => web_sys::console::error_1(&e.into()),
+                Err(e) => self.api_failed(e),
             }
             return;
         }
@@ -329,7 +377,7 @@ impl AppState {
                         self.view_title.set("All stations".to_string());
                     }
                 }
-                Err(e) => web_sys::console::error_1(&e.into()),
+                Err(e) => self.api_failed(e),
             },
             "countries" => match api::fetch_countries().await {
                 Ok(items) => {
@@ -339,7 +387,7 @@ impl AppState {
                         self.view_title.set("Countries".to_string());
                     }
                 }
-                Err(e) => web_sys::console::error_1(&e.into()),
+                Err(e) => self.api_failed(e),
             },
             "languages" => match api::fetch_languages().await {
                 Ok(items) => {
@@ -349,7 +397,7 @@ impl AppState {
                         self.view_title.set("Languages".to_string());
                     }
                 }
-                Err(e) => web_sys::console::error_1(&e.into()),
+                Err(e) => self.api_failed(e),
             },
             "tags" | "genres" => match api::fetch_tags().await {
                 Ok(items) => {
@@ -359,7 +407,7 @@ impl AppState {
                         self.view_title.set("Genres".to_string());
                     }
                 }
-                Err(e) => web_sys::console::error_1(&e.into()),
+                Err(e) => self.api_failed(e),
             },
             "favorites" => {
                 self.ensure_favorites().await;
@@ -382,7 +430,7 @@ impl AppState {
                         self.view_title.set("Popular".to_string());
                     }
                 }
-                Err(e) => web_sys::console::error_1(&e.into()),
+                Err(e) => self.api_failed(e),
             },
         }
     }
@@ -416,7 +464,7 @@ impl AppState {
                         this.view_title.set(format!("Search: {trimmed}"));
                     }
                 }
-                Err(e) => web_sys::console::error_1(&e.into()),
+                Err(e) => this.api_failed(e),
             }
         });
     }

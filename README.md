@@ -44,9 +44,9 @@ cap_drop:
 ```
 
 `RADIO_BROWSER_STATION_LIMIT` controls the default number of stations fetched
-per request and defaults to `1000`. Set it in `.env` to change the default. Set
-it to `0` to omit the API limit and fetch all available stations; this can use
-significantly more time, memory, and bandwidth.
+per request and defaults to `1000`. Set it in `.env` to change the default
+(`0` behaves like the default). Explicit `?limit=` values are capped at
+10,000 stations per request to bound memory use.
 
 ### From source
 
@@ -95,8 +95,13 @@ Then open the URL printed by Trunk (port 8080 by default).
 ## First Configuration
 1. Open `http://localhost:8000` in a browser
 2. Sign in with the application user account. Default first user is admin/admin
-3. Browse or search for radio stations, create more users
-4. Select a station to stream it
+3. Change the admin password immediately (Account → Change Password). The
+   server logs a warning on startup while the default password is in use.
+4. Browse or search for radio stations, create more users
+5. Select a station to stream it
+
+All API endpoints except sign-in/sign-out require authentication, and the web
+UI blocks usage behind the sign-in dialog until you are logged in.
 
 ## Usage
 

@@ -2,21 +2,35 @@ services:
   app:
     build: .
     container_name: radio-browser-plus
-    ports:
-      - '8000:8000'
+    # No published ports: traffic arrives via the reverse proxy network below.
+    # The app itself speaks plain HTTP on 8000; terminate TLS at the proxy.
     volumes:
       - ./data:/app/data
     environment:
-      - FAVORITES_FILE=/app/data/favorites.json
       - RADIO_BROWSER_STATION_LIMIT=${RADIO_BROWSER_STATION_LIMIT:-1000}
       - RUST_LOG=info
       - RUST_BACKTRACE=0
     user: "${UID:-1000}:${GID:-1000}"
     cap_drop:
       - ALL
+    # The app writes only to /app/data (mounted volume), so the rest of the
+    # filesystem can stay read-only. no-new-privileges blocks privilege
+    # escalation via setuid binaries.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    # Bound blast radius of resource-exhaustion attempts.
+    mem_limit: 512m
+    cpus: 1.0
     restart: unless-stopped
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - proxy-frontend
+
+networks:
+  proxy-frontend:
+    external: true

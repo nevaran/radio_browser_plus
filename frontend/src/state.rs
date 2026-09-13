@@ -431,46 +431,40 @@ impl AppState {
         }
 
         match view.as_str() {
-            "all" => match api::fetch_all_stations().await {
-                Ok(mut stations) => {
-                    sort_by_name_asc(&mut stations, station_sort_key);
-                    if self.current_gen(gen) && self.view.get_untracked() == "all" {
-                        self.stations.set(stations);
-                        self.view_title.set("All stations".to_string());
-                    }
-                }
-                Err(e) => self.api_failed(e),
-            },
-            "countries" => match api::fetch_countries().await {
-                Ok(items) => {
-                    if self.current_gen(gen) && self.view.get_untracked() == "countries" {
-                        self.collections.set(to_collection(items, "countries"));
-                        self.collection_kind.set("countries".to_string());
-                        self.view_title.set("Countries".to_string());
-                    }
-                }
-                Err(e) => self.api_failed(e),
-            },
-            "languages" => match api::fetch_languages().await {
-                Ok(items) => {
-                    if self.current_gen(gen) && self.view.get_untracked() == "languages" {
-                        self.collections.set(to_collection(items, "languages"));
-                        self.collection_kind.set("languages".to_string());
-                        self.view_title.set("Languages".to_string());
-                    }
-                }
-                Err(e) => self.api_failed(e),
-            },
-            "tags" | "genres" => match api::fetch_genres().await {
-                Ok(items) => {
-                    if self.current_gen(gen) {
-                        self.collections.set(to_collection(items, "genres"));
-                        self.collection_kind.set("genres".to_string());
-                        self.view_title.set("Genres".to_string());
-                    }
-                }
-                Err(e) => self.api_failed(e),
-            },
+            "all" => {
+                self.show_station_list(
+                    gen,
+                    Some("all"),
+                    "All stations",
+                    true,
+                    api::fetch_all_stations(),
+                )
+                .await
+            }
+            "countries" => {
+                self.show_collections(
+                    gen,
+                    Some("countries"),
+                    "countries",
+                    "Countries",
+                    api::fetch_countries(),
+                )
+                .await
+            }
+            "languages" => {
+                self.show_collections(
+                    gen,
+                    Some("languages"),
+                    "languages",
+                    "Languages",
+                    api::fetch_languages(),
+                )
+                .await
+            }
+            "tags" | "genres" => {
+                self.show_collections(gen, None, "genres", "Genres", api::fetch_genres())
+                    .await
+            }
             "favorites" => {
                 self.ensure_favorites().await;
                 if self.current_gen(gen) && self.view.get_untracked() == "favorites" {
@@ -485,15 +479,62 @@ impl AppState {
                     self.view_title.set("Favorites".to_string());
                 }
             }
-            _ => match api::fetch_popular().await {
-                Ok(stations) => {
-                    if self.current_gen(gen) {
-                        self.stations.set(stations);
-                        self.view_title.set("Popular".to_string());
-                    }
+            _ => {
+                self.show_station_list(gen, None, "Popular", false, api::fetch_popular())
+                    .await
+            }
+        }
+    }
+
+    /// Fetch a station list for a top-level view and display it if still
+    /// current. `expected_view` additionally requires the view to still match
+    /// (`None` = generation check only, as before).
+    async fn show_station_list(
+        &self,
+        gen: u64,
+        expected_view: Option<&str>,
+        title: &str,
+        sort: bool,
+        fetch: impl std::future::Future<Output = Result<Vec<Station>, String>>,
+    ) {
+        match fetch.await {
+            Ok(mut stations) => {
+                if sort {
+                    sort_by_name_asc(&mut stations, station_sort_key);
                 }
-                Err(e) => self.api_failed(e),
-            },
+                let current = self.current_gen(gen)
+                    && expected_view.is_none_or(|v| self.view.get_untracked() == v);
+                if current {
+                    self.stations.set(stations);
+                    self.view_title.set(title.to_string());
+                }
+            }
+            Err(e) => self.api_failed(e),
+        }
+    }
+
+    /// Fetch a collection list (countries/languages/genres) and display it if
+    /// still current. Same staleness contract as [`Self::show_station_list`].
+    async fn show_collections<T: CollectionRow>(
+        &self,
+        gen: u64,
+        expected_view: Option<&str>,
+        kind: &str,
+        title: &str,
+        fetch: impl std::future::Future<Output = Result<Vec<T>, String>>,
+    ) {
+        match fetch.await {
+            Ok(items) => {
+                let current = self.current_gen(gen)
+                    && expected_view.is_none_or(|v| self.view.get_untracked() == v);
+                if current {
+                    let kind = kind.to_string();
+                    self.collections.set(to_collection(items, &kind));
+                    self.collection_kind.set(kind);
+                    self.view_title.set(title.to_string());
+                }
+            }
+            Err(e) => self.api_failed(e),
         }
     }
 

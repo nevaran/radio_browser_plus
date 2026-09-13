@@ -19,50 +19,47 @@ impl RadioBrowserClient {
         }
     }
 
-    /// Fetch all stations
-    pub async fn get_all_stations(&self, limit: u32) -> Result<Vec<Station>> {
-        debug!("Fetching all stations with limit {}", limit);
+    /// GET `{base}/{path}?hidebroken=true{extra}{limit}` and parse the array.
+    /// `extra` holds endpoint-specific query segments (already encoded).
+    async fn fetch_station_list(
+        &self,
+        path: &str,
+        extra: &str,
+        limit: u32,
+    ) -> Result<Vec<Station>> {
+        debug!("Fetching {path}{extra} with limit {limit}");
         let url = format!(
-            "{}/stations?hidebroken=true{}",
+            "{}{}?hidebroken=true{}{}",
             self.base_url,
+            path,
+            extra,
             limit_query(limit)
         );
         self.fetch_json_array(&url).await
+    }
+
+    /// Fetch all stations
+    pub async fn get_all_stations(&self, limit: u32) -> Result<Vec<Station>> {
+        self.fetch_station_list("/stations", "", limit).await
     }
 
     /// Fetch popular stations sorted by click count
     pub async fn get_popular_stations(&self, limit: u32) -> Result<Vec<Station>> {
-        debug!("Fetching popular stations with limit {}", limit);
-        let url = format!(
-            "{}/stations?hidebroken=true&order=clickcount&reverse=true{}",
-            self.base_url,
-            limit_query(limit)
-        );
-        self.fetch_json_array(&url).await
+        self.fetch_station_list("/stations", "&order=clickcount&reverse=true", limit)
+            .await
     }
 
     /// Search stations by name
     pub async fn search_stations(&self, query: &str, limit: u32) -> Result<Vec<Station>> {
-        debug!("Searching stations with query: {}", query);
-        let url = format!(
-            "{}/stations/search?hidebroken=true&name={}{}",
-            self.base_url,
-            urlencoding::encode(query),
-            limit_query(limit)
-        );
-        self.fetch_json_array(&url).await
+        let extra = format!("&name={}", urlencoding::encode(query));
+        self.fetch_station_list("/stations/search", &extra, limit)
+            .await
     }
 
     /// Get stations by country
     pub async fn get_stations_by_country(&self, country: &str, limit: u32) -> Result<Vec<Station>> {
-        debug!("Fetching stations for country: {}", country);
-        let url = format!(
-            "{}/stations/bycountry/{}?hidebroken=true{}",
-            self.base_url,
-            urlencoding::encode(country),
-            limit_query(limit)
-        );
-        self.fetch_json_array(&url).await
+        let path = format!("/stations/bycountry/{}", urlencoding::encode(country));
+        self.fetch_station_list(&path, "", limit).await
     }
 
     /// Get stations by language
@@ -71,26 +68,14 @@ impl RadioBrowserClient {
         language: &str,
         limit: u32,
     ) -> Result<Vec<Station>> {
-        debug!("Fetching stations for language: {}", language);
-        let url = format!(
-            "{}/stations/bylanguage/{}?hidebroken=true{}",
-            self.base_url,
-            urlencoding::encode(language),
-            limit_query(limit)
-        );
-        self.fetch_json_array(&url).await
+        let path = format!("/stations/bylanguage/{}", urlencoding::encode(language));
+        self.fetch_station_list(&path, "", limit).await
     }
 
     /// Get stations by tag/genre
     pub async fn get_stations_by_tag(&self, tag: &str, limit: u32) -> Result<Vec<Station>> {
-        debug!("Fetching stations for tag: {}", tag);
-        let url = format!(
-            "{}/stations/bytag/{}?hidebroken=true{}",
-            self.base_url,
-            urlencoding::encode(tag),
-            limit_query(limit)
-        );
-        self.fetch_json_array(&url).await
+        let path = format!("/stations/bytag/{}", urlencoding::encode(tag));
+        self.fetch_station_list(&path, "", limit).await
     }
 
     /// Get stations for a curated genre: fan out over its raw tags

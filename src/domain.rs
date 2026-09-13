@@ -217,6 +217,30 @@ pub struct UpdateFavoriteRequest {
     pub tags: Option<String>,
 }
 
+/// Shared construction: both favorite payloads carry the same fields.
+macro_rules! impl_favorite_from_request {
+    ($request:ty) => {
+        impl From<$request> for Favorite {
+            fn from(payload: $request) -> Self {
+                Self {
+                    station_id: payload.station_id,
+                    name: payload.name,
+                    favicon: payload.favicon,
+                    url: payload.url,
+                    url_resolved: payload.url_resolved,
+                    country: payload.country,
+                    bitrate: payload.bitrate,
+                    genre: payload.genre,
+                    tags: payload.tags,
+                }
+            }
+        }
+    };
+}
+
+impl_favorite_from_request!(ToggleFavoriteRequest);
+impl_favorite_from_request!(UpdateFavoriteRequest);
+
 /// Favorites response wrapper
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FavoritesResponse {

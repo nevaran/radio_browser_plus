@@ -483,6 +483,51 @@ impl AuthService {
         .expect("valid logout cookie")
     }
 
+    /// Resolve the acting user from request headers, or the failure message
+    /// for a 401 response.
+    fn session_user(&self, headers: &HeaderMap) -> Result<User, &'static str> {
+        let Some(session_id) = Self::extract_session_id(headers) else {
+            return Err("Not authenticated");
+        };
+
+        self.current_user_from_session(&session_id)
+            .ok_or("Session expired")
+    }
+
+    fn unauthorized(message: &str) -> Response {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": message })),
+        )
+            .into_response()
+    }
+
+    /// `{"username","role"}` body shared by login/me/create-user responses.
+    fn user_json(user: &User) -> serde_json::Value {
+        serde_json::json!({
+            "username": user.username,
+            "role": user.role.as_str()
+        })
+    }
+
+    /// Mark an auth JSON response as uncacheable.
+    fn no_store(response: Response) -> Response {
+        let mut response = response;
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+    }
+
+    /// Attach a refreshed session cookie to an auth JSON response.
+    fn with_session_cookie(response: Response, session_id: &str) -> Response {
+        let mut response = response;
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, Self::cookie_header(session_id));
+        response
+    }
+
     pub fn login_response(
         &self,
         _headers: HeaderMap,
@@ -490,22 +535,9 @@ impl AuthService {
     ) -> Response {
         match self.login(&payload.username, &payload.password) {
             Ok((user, session_id)) => {
-                let response = (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "username": user.username,
-                        "role": user.role.as_str()
-                    })),
-                )
-                    .into_response();
-                let mut response = response;
-                response
-                    .headers_mut()
-                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-                response
-                    .headers_mut()
-                    .append(header::SET_COOKIE, Self::cookie_header(&session_id));
-                response
+                let response = (StatusCode::OK, Json(Self::user_json(&user))).into_response();
+                let response = Self::no_store(response);
+                Self::with_session_cookie(response, &session_id)
             }
             Err(message) => (
                 if message.starts_with("Too many") {
@@ -520,38 +552,17 @@ impl AuthService {
     }
 
     pub fn me_response(&self, headers: HeaderMap) -> Response {
-        let Some(session_id) = Self::extract_session_id(&headers) else {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "Not authenticated" })),
-            )
-                .into_response();
+        let session_id = match Self::extract_session_id(&headers) {
+            Some(id) => id,
+            None => return Self::unauthorized("Not authenticated"),
         };
-
         let Some(user) = self.current_user_from_session(&session_id) else {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "Session expired" })),
-            )
-                .into_response();
+            return Self::unauthorized("Session expired");
         };
 
-        let response = (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "username": user.username,
-                "role": user.role.as_str()
-            })),
-        )
-            .into_response();
-        let mut response = response;
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        response
-            .headers_mut()
-            .append(header::SET_COOKIE, Self::cookie_header(&session_id));
-        response
+        let response = (StatusCode::OK, Json(Self::user_json(&user))).into_response();
+        let response = Self::no_store(response);
+        Self::with_session_cookie(response, &session_id)
     }
 
     pub fn logout_response(&self, headers: HeaderMap) -> Response {
@@ -561,10 +572,8 @@ impl AuthService {
 
         let response =
             (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response();
+        let response = Self::no_store(response);
         let mut response = response;
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         response
             .headers_mut()
             .append(header::SET_COOKIE, Self::clear_cookie_header());
@@ -576,43 +585,21 @@ impl AuthService {
         headers: HeaderMap,
         Json(payload): Json<CreateUserRequest>,
     ) -> Response {
-        let Some(session_id) = Self::extract_session_id(&headers) else {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "Not authenticated" })),
-            )
-                .into_response();
-        };
-
-        let Some(actor) = self.current_user_from_session(&session_id) else {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "Session expired" })),
-            )
-                .into_response();
+        let actor = match self.session_user(&headers) {
+            Ok(actor) => actor,
+            Err(message) => return Self::unauthorized(message),
         };
 
         let response =
             match self.create_user(&payload.username, &payload.password, &payload.role, &actor) {
-                Ok(user) => (
-                    StatusCode::CREATED,
-                    Json(serde_json::json!({
-                        "username": user.username,
-                        "role": user.role.as_str()
-                    })),
-                )
-                    .into_response(),
+                Ok(user) => (StatusCode::CREATED, Json(Self::user_json(&user))).into_response(),
                 Err(message) => (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": message })),
                 )
                     .into_response(),
             };
-        let mut response = response;
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        response
+        Self::no_store(response)
     }
 
     pub fn change_password_response(
@@ -620,20 +607,9 @@ impl AuthService {
         headers: HeaderMap,
         Json(payload): Json<ChangePasswordRequest>,
     ) -> Response {
-        let Some(session_id) = Self::extract_session_id(&headers) else {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "Not authenticated" })),
-            )
-                .into_response();
-        };
-
-        let Some(actor) = self.current_user_from_session(&session_id) else {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "Session expired" })),
-            )
-                .into_response();
+        let actor = match self.session_user(&headers) {
+            Ok(actor) => actor,
+            Err(message) => return Self::unauthorized(message),
         };
 
         let response = match self.change_password_for_user(
@@ -648,11 +624,7 @@ impl AuthService {
             )
                 .into_response(),
         };
-        let mut response = response;
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        response
+        Self::no_store(response)
     }
 }
 

@@ -8,27 +8,54 @@ use leptos::prelude::*;
 
 use crate::state::AppState;
 
-/// Modal dismissal is blocked while logged out so the login dialog cannot be
-/// bypassed: no session means no usable app.
-fn close_button(
-    target: &'static str,
+/// Shared dialog shell: backdrop, centered content, titled header. The form
+/// body differs per dialog and arrives as children. Dismissal (backdrop and
+/// ×) stays blocked while logged out so the login dialog cannot be bypassed.
+#[component]
+fn ModalShell(
+    modal_id: &'static str,
+    title: &'static str,
     open: RwSignal<bool>,
     user: RwSignal<Option<crate::models::User>>,
+    children: ChildrenFn,
 ) -> impl IntoView {
+    let title_id = format!("{modal_id}-title");
+    let close_title_id = title_id.clone();
     view! {
-        <button
-            type="button"
-            class="auth-close"
-            data-close=target
-            aria-label="Close"
-            on:click=move |_| {
-                if user.with(|u| u.is_some()) {
-                    open.set(false);
+        <div id=modal_id class="auth-modal" aria-hidden="false">
+            <div
+                class="auth-modal-backdrop"
+                on:click=move |_| {
+                    if user.with(|u| u.is_some()) {
+                        open.set(false);
+                    }
                 }
-            }
-        >
-            "×"
-        </button>
+            ></div>
+            <div
+                class="auth-modal-content"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby=title_id
+            >
+                <div class="auth-modal-header">
+                    <h3 id=close_title_id>{title}</h3>
+                    <button
+                        type="button"
+                        class="auth-close"
+                        data-close=modal_id
+                        aria-label="Close"
+                        on:click=move |_| {
+                            if user.with(|u| u.is_some()) {
+                                open.set(false);
+                            }
+                        }
+                    >
+                        "×"
+                    </button>
+                </div>
+                {children()}
+            </div>
+        </div>
     }
 }
 
@@ -43,25 +70,12 @@ pub fn LoginModal() -> impl IntoView {
 
     view! {
         <Show when=move || login_open.get()>
-            <div id="login-modal" class="auth-modal" aria-hidden="false">
-                <div
-                    class="auth-modal-backdrop"
-                    on:click=move |_| {
-                        if user.with(|u| u.is_some()) {
-                            login_open.set(false);
-                        }
-                    }
-                ></div>
-                <div
-                    class="auth-modal-content"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="login-modal-title"
-                >
-                    <div class="auth-modal-header">
-                        <h3 id="login-modal-title">"Sign in"</h3>
-                        {close_button("login-modal", login_open, user)}
-                    </div>
+            <ModalShell
+                modal_id="login-modal"
+                title="Sign in"
+                open=login_open
+                user=user
+            >
                     <form
                         id="login-form"
                         class="auth-form"
@@ -116,8 +130,7 @@ pub fn LoginModal() -> impl IntoView {
                         </label>
                         <button type="submit" class="primary-button">"Login"</button>
                     </form>
-                </div>
-            </div>
+            </ModalShell>
         </Show>
     }
 }
@@ -137,25 +150,12 @@ pub fn CreateUserModal() -> impl IntoView {
             create_user_open.get()
                 && user.with(|u| u.as_ref().is_some_and(|x| x.role == "admin"))
         }>
-            <div id="create-user-modal" class="auth-modal" aria-hidden="false">
-                <div
-                    class="auth-modal-backdrop"
-                    on:click=move |_| {
-                        if user.with(|u| u.is_some()) {
-                            create_user_open.set(false);
-                        }
-                    }
-                ></div>
-                <div
-                    class="auth-modal-content"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="create-user-modal-title"
-                >
-                    <div class="auth-modal-header">
-                        <h3 id="create-user-modal-title">"Create User"</h3>
-                        {close_button("create-user-modal", create_user_open, user)}
-                    </div>
+            <ModalShell
+                modal_id="create-user-modal"
+                title="Create User"
+                open=create_user_open
+                user=user
+            >
                     <form
                         id="create-user-form"
                         class="auth-form"
@@ -229,8 +229,7 @@ pub fn CreateUserModal() -> impl IntoView {
                         </label>
                         <button type="submit" class="primary-button">"Create User"</button>
                     </form>
-                </div>
-            </div>
+            </ModalShell>
         </Show>
     }
 }
@@ -246,25 +245,12 @@ pub fn ChangePasswordModal() -> impl IntoView {
 
     view! {
         <Show when=move || change_password_open.get() && user.with(|u| u.is_some())>
-            <div id="change-password-modal" class="auth-modal" aria-hidden="false">
-                <div
-                    class="auth-modal-backdrop"
-                    on:click=move |_| {
-                        if user.with(|u| u.is_some()) {
-                            change_password_open.set(false);
-                        }
-                    }
-                ></div>
-                <div
-                    class="auth-modal-content"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="change-password-modal-title"
-                >
-                    <div class="auth-modal-header">
-                        <h3 id="change-password-modal-title">"Change Password"</h3>
-                        {close_button("change-password-modal", change_password_open, user)}
-                    </div>
+            <ModalShell
+                modal_id="change-password-modal"
+                title="Change Password"
+                open=change_password_open
+                user=user
+            >
                     <form
                         id="change-password-form"
                         class="auth-form"
@@ -320,8 +306,7 @@ pub fn ChangePasswordModal() -> impl IntoView {
                         </label>
                         <button type="submit" class="primary-button">"Update Password"</button>
                     </form>
-                </div>
-            </div>
+            </ModalShell>
         </Show>
     }
 }

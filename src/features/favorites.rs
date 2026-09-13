@@ -89,21 +89,11 @@ impl FavoritesHandlers {
         Json(payload): Json<ToggleFavoriteRequest>,
     ) -> Result<axum::Json<FavoritesResponse>> {
         debug!("Toggling favorite for station: {}", payload.station_id);
-        let favorite = Favorite {
-            station_id: payload.station_id.clone(),
-            name: payload.name,
-            url: payload.url,
-            url_resolved: payload.url_resolved,
-            favicon: payload.favicon,
-            country: payload.country,
-            bitrate: payload.bitrate,
-            genre: payload.genre,
-            tags: payload.tags,
-        };
+        let favorite = Favorite::from(payload);
         Self::check_favorite(&favorite)?;
         let repo = self.repo_for_headers(&headers).await?;
 
-        if !repo.is_favorite(&payload.station_id).await
+        if !repo.is_favorite(&favorite.station_id).await
             && repo.count().await >= Self::MAX_FAVORITES_PER_USER
         {
             return Err(AppError::BadRequest("Too many favorites".to_string()));
@@ -122,21 +112,12 @@ impl FavoritesHandlers {
         Json(payload): Json<UpdateFavoriteRequest>,
     ) -> Result<axum::Json<FavoritesResponse>> {
         debug!("Updating favorite for station: {}", payload.station_id);
-        let favorite = Favorite {
-            station_id: payload.station_id.clone(),
-            name: payload.name,
-            url: payload.url,
-            url_resolved: payload.url_resolved,
-            favicon: payload.favicon,
-            country: payload.country,
-            bitrate: payload.bitrate,
-            genre: payload.genre,
-            tags: payload.tags,
-        };
+        let favorite = Favorite::from(payload);
         Self::check_favorite(&favorite)?;
         let repo = self.repo_for_headers(&headers).await?;
 
-        let data = repo.update(&payload.station_id, favorite).await?;
+        let station_id = favorite.station_id.clone();
+        let data = repo.update(&station_id, favorite).await?;
         Ok(axum::Json(FavoritesResponse {
             favorites: data.as_map().clone(),
         }))

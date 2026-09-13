@@ -101,7 +101,7 @@ pub fn Dialog() -> impl IntoView {
                     </div>
                 }
                     .into_any(),
-                None => view! { <></> }.into_any(),
+                None => view! { <div></div> }.into_any(),
             }}
         </Show>
     }

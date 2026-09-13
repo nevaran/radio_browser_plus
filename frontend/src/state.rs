@@ -402,7 +402,10 @@ impl AppState {
             let result = match view.as_str() {
                 "countries" => api::fetch_stations_by_country(&filter_value).await,
                 "languages" => api::fetch_stations_by_language(&filter_value).await,
-                "tags" | "genres" => api::fetch_stations_by_tag(&filter_value).await,
+                // Raw tag deep links keep working; the Genres UI itself uses
+                // curated buckets (canonical names + Variety).
+                "tags" => api::fetch_stations_by_tag(&filter_value).await,
+                "genres" => api::fetch_stations_by_genre(&filter_value).await,
                 _ => Ok(Vec::new()),
             };
             match result {
@@ -458,7 +461,7 @@ impl AppState {
                 }
                 Err(e) => self.api_failed(e),
             },
-            "tags" | "genres" => match api::fetch_tags().await {
+            "tags" | "genres" => match api::fetch_genres().await {
                 Ok(items) => {
                     if self.current_gen(gen) {
                         self.collections.set(to_collection(items, "genres"));

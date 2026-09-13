@@ -45,8 +45,9 @@ cap_drop:
 
 `RADIO_BROWSER_STATION_LIMIT` controls the default number of stations fetched
 per request and defaults to `1000`. Set it in `.env` to change the default
-(`0` behaves like the default). Explicit `?limit=` values are capped at
-10,000 stations per request to bound memory use.
+(`0` behaves like the default). Explicit `?limit=` values are passed through
+to the upstream API uncapped. Collection cards cap their displayed counts at
+the default, matching what a click actually fetches.
 
 ### From source
 

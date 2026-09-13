@@ -12,9 +12,6 @@ pub struct StationsHandlers {
     default_limit: u32,
 }
 
-/// Absolute ceiling for station counts per request. Bounds response memory
-/// and upstream load no matter what `?limit=` a client sends.
-pub const MAX_STATION_LIMIT: u32 = 10_000;
 /// Max length for free-text filters and ids.
 const MAX_FILTER_LEN: usize = 200;
 const MAX_STATION_ID_LEN: usize = 128;
@@ -28,19 +25,26 @@ fn check_filter_len(value: &str, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Default station count per request, from `RADIO_BROWSER_STATION_LIMIT`
+/// (0/unset/unparsable means 1000). Deliberately uncapped: an explicit
+/// operator setting is passed through to the upstream API as-is.
+/// Collection cards clamp their displayed counts to this: it is what a click
+/// actually fetches, so larger upstream totals would be unreachable.
+pub(crate) fn default_station_limit() -> u32 {
+    std::env::var("RADIO_BROWSER_STATION_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(|n| if n == 0 { 1000 } else { n })
+        .unwrap_or(1000)
+}
+
 impl StationsHandlers {
     pub fn new(client: RadioBrowserClient) -> Self {
-        let default_limit = std::env::var("RADIO_BROWSER_STATION_LIMIT")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .map(|n| {
-                if n == 0 {
-                    1000
-                } else {
-                    n.min(MAX_STATION_LIMIT)
-                }
-            })
-            .unwrap_or(1000);
+        let default_limit = default_station_limit();
+        tracing::info!(
+            default_limit,
+            "Station handlers initialized (RADIO_BROWSER_STATION_LIMIT)"
+        );
 
         Self {
             client,
@@ -49,11 +53,13 @@ impl StationsHandlers {
     }
 
     /// Resolve a client-supplied limit: missing/zero means the default,
-    /// anything larger is clamped to the absolute ceiling.
+    /// anything else is passed through to the upstream API uncapped.
+    /// (Memory stays bounded by the per-response body cap; all station
+    /// endpoints require authentication.)
     fn resolve_limit(&self, requested: Option<u32>) -> u32 {
         match requested {
             None | Some(0) => self.default_limit,
-            Some(n) => n.min(MAX_STATION_LIMIT),
+            Some(n) => n,
         }
     }
 
@@ -96,6 +102,18 @@ impl StationsHandlers {
     ) -> Result<Json<Vec<Station>>> {
         let limit = self.resolve_limit(params.limit);
 
+        // Curated genre buckets (including Variety) take precedence over raw
+        // tag queries when both are given.
+        if let Some(genre) = &params.genre {
+            check_filter_len(genre, "Genre filter")?;
+            debug!("Getting stations by curated genre: {}", genre);
+            return self
+                .client
+                .get_stations_by_genre(genre, limit)
+                .await
+                .map(Json);
+        }
+
         if let Some(country) = &params.country {
             check_filter_len(country, "Country filter")?;
             debug!("Getting stations by country: {}", country);
@@ -132,6 +150,7 @@ pub struct StationsQueryParams {
     pub country: Option<String>,
     pub language: Option<String>,
     pub tag: Option<String>,
+    pub genre: Option<String>,
     pub limit: Option<u32>,
 }
 
@@ -158,14 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn limits_are_clamped_to_the_ceiling() {
+    fn limits_pass_through_uncapped() {
         let handlers = handlers_with_default(1000);
         assert_eq!(handlers.resolve_limit(None), 1000);
         assert_eq!(handlers.resolve_limit(Some(0)), 1000);
         assert_eq!(handlers.resolve_limit(Some(50)), 50);
         assert_eq!(handlers.resolve_limit(Some(10_000)), 10_000);
-        assert_eq!(handlers.resolve_limit(Some(10_001)), 10_000);
-        assert_eq!(handlers.resolve_limit(Some(u32::MAX)), 10_000);
+        assert_eq!(handlers.resolve_limit(Some(50_000)), 50_000);
+        assert_eq!(handlers.resolve_limit(Some(u32::MAX)), u32::MAX);
     }
 
     #[test]

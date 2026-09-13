@@ -73,6 +73,12 @@ fn is_valid_username(normalized: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
 }
 
+/// Strip control characters and cap length so untrusted input (login attempts
+/// may carry arbitrary usernames) cannot forge lines in the logs.
+fn sanitize_for_log(value: &str) -> String {
+    value.chars().filter(|c| !c.is_control()).take(64).collect()
+}
+
 /// Recent login failures per username: (window start, attempts in window).
 type LoginFailures = HashMap<String, (chrono::DateTime<Utc>, u32)>;
 /// Bound on tracked usernames so failure tracking itself cannot grow without
@@ -122,8 +128,12 @@ impl AuthService {
     }
 
     pub fn ensure_default_admin(&self, username: &str, password: &str) {
-        if self.users.read().unwrap().is_empty() {
-            let _ = self.create_user_internal(username, password, UserRole::Admin, true);
+        if self.users.read().unwrap().is_empty()
+            && self
+                .create_user_internal(username, password, UserRole::Admin, true)
+                .is_ok()
+        {
+            tracing::info!("Created default admin account");
         }
     }
 
@@ -245,6 +255,10 @@ impl AuthService {
             let failures = self.login_failures.lock().unwrap();
             if let Some((window_started, count)) = failures.get(&normalized) {
                 if *count >= 5 && *window_started + chrono::Duration::minutes(15) > now {
+                    tracing::warn!(
+                        username = %sanitize_for_log(&normalized),
+                        "Login blocked: too many attempts"
+                    );
                     return Err("Too many login attempts; try again later".to_string());
                 }
             }
@@ -253,6 +267,10 @@ impl AuthService {
         let users = self.users.read().unwrap();
         let user = users.get(&normalized).cloned().ok_or_else(|| {
             self.record_login_failure(&normalized, now);
+            tracing::warn!(
+                username = %sanitize_for_log(&normalized),
+                "Failed login attempt (unknown user)"
+            );
             "Invalid credentials".to_string()
         })?;
 
@@ -260,6 +278,10 @@ impl AuthService {
             .map_err(|_| "Password verification failed".to_string())?
         {
             self.record_login_failure(&normalized, now);
+            tracing::warn!(
+                username = %sanitize_for_log(&normalized),
+                "Failed login attempt (wrong password)"
+            );
             return Err("Invalid credentials".to_string());
         }
 
@@ -274,6 +296,7 @@ impl AuthService {
             },
         );
         self.write_sessions(&sessions);
+        tracing::info!(username = %sanitize_for_log(&normalized), "User logged in");
         Ok((user, session_id))
     }
 
@@ -330,7 +353,14 @@ impl AuthService {
             _ => UserRole::Reader,
         };
 
-        self.create_user_internal(username, password, user_role, false)
+        let user = self.create_user_internal(username, password, user_role, false)?;
+        tracing::info!(
+            username = %sanitize_for_log(&user.username),
+            role = user.role.as_str(),
+            actor = %sanitize_for_log(&actor.username),
+            "User account created"
+        );
+        Ok(user)
     }
 
     pub fn change_password_for_user(
@@ -366,6 +396,10 @@ impl AuthService {
             hash(trimmed_new, DEFAULT_COST).map_err(|_| "Failed to hash password".to_string())?;
         user.password_hash = new_hash;
         self.write_users(&users);
+        tracing::info!(
+            username = %sanitize_for_log(&normalized),
+            "Password changed; sessions revoked"
+        );
         let revoked_name = normalized.clone();
         drop(users);
 
@@ -389,8 +423,14 @@ impl AuthService {
 
     pub fn logout(&self, session_id: &str) {
         let mut sessions = self.sessions.write().unwrap();
-        sessions.remove(session_id);
+        let username = sessions.remove(session_id).map(|s| s.username);
         self.write_sessions(&sessions);
+        match username {
+            Some(username) => {
+                tracing::info!(username = %sanitize_for_log(&username), "User logged out")
+            }
+            None => tracing::debug!("Logout with unknown session"),
+        }
     }
 
     /// Session cookie name. The `__Host-` prefix tells browsers to accept the

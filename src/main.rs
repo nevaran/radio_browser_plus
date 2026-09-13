@@ -51,6 +51,7 @@ async fn main() {
     // Initialize infrastructure
     let radio_client = RadioBrowserClient::new(None);
     let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
+    info!(data_dir = %data_dir, "Using data directory");
     let auth = Arc::new(AuthService::new(&data_dir));
     auth.ensure_default_admin("admin", "admin");
     if auth.admin_uses_default_password("admin", "admin") {
@@ -80,6 +81,7 @@ async fn main() {
     let collections_1 = collections.clone();
     let collections_2 = collections.clone();
     let collections_3 = collections.clone();
+    let collections_4 = collections.clone();
 
     let health_1 = health.clone();
 
@@ -142,6 +144,13 @@ async fn main() {
             get(move || {
                 let c = collections_3.clone();
                 async move { c.tags().await }
+            }),
+        )
+        .route(
+            "/api/genres",
+            get(move || {
+                let c = collections_4.clone();
+                async move { c.genres().await }
             }),
         )
         // Auth endpoints

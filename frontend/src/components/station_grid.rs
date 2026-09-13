@@ -8,9 +8,6 @@ use crate::models::{station_id, Station};
 use crate::state::AppState;
 use crate::utils::{format_bitrate, primary_image, truncate_name, PLACEHOLDER_SVG};
 
-/// Cap rendered cards like the old UI did (virtualization threshold).
-const MAX_RENDERED: usize = 1000;
-
 #[component]
 fn StationCard(station: Station) -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState provided");
@@ -93,10 +90,12 @@ pub fn StationGrid() -> impl IntoView {
                 view! { <div class="station-card"><h3>"No stations found"</h3></div> }
             }
         >
+            // Render everything fetched: the fetch limit already bounds the
+            // list, and cutting the grid would silently drop stations (the
+            // tail after display sorting is disproportionately regional or
+            // non-Latin-script ones). Artwork stays cheap via lazy loading.
             <For
-                each=move || {
-                    listed.stations.get().into_iter().take(MAX_RENDERED).collect::<Vec<_>>()
-                }
+                each=move || listed.stations.get()
                 key=|s| station_id(s).unwrap_or_default()
                 let:station
             >

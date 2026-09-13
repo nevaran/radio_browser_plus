@@ -122,8 +122,14 @@ pub async fn fetch_languages() -> Result<Vec<Language>, String> {
     get_json("/api/languages").await
 }
 
-pub async fn fetch_tags() -> Result<Vec<Tag>, String> {
-    get_json("/api/tags").await
+/// Curated genre catalog (canonical genres + Variety bucket).
+pub async fn fetch_genres() -> Result<Vec<Tag>, String> {
+    get_json("/api/genres").await
+}
+
+/// Stations for a curated genre bucket (canonical name or Variety).
+pub async fn fetch_stations_by_genre(genre: &str) -> Result<Vec<Station>, String> {
+    get_json(&format!("/api/stations?genre={}", encode(genre))).await
 }
 
 pub async fn fetch_me() -> Result<User, String> {

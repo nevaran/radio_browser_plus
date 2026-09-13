@@ -13,9 +13,23 @@
   --border: rgba(255, 255, 255, 0.12);
   --shadow: rgba(0, 0, 0, 0.35);
   --viewport-height: 100dvh;
-  --safe-top: 0px;
-  --safe-bottom: 0px;
-  --mobile-bottom-gap: max(var(--safe-bottom, 0px), env(safe-area-inset-bottom, 0px));
+  /* Real system-bar inset reported by the browser. Requires
+     viewport-fit=cover in the viewport meta tag; 0px where unsupported.
+     This is the single source of truth for keeping UI clear of notches,
+     the status bar, and the system gesture/navigation bar. */
+  --sab: env(safe-area-inset-bottom, 0px);
+  /* Guaranteed minimum bottom clearance, raised for real touch devices
+     below. Covers Android configurations (notably button navigation)
+     where the viewport extends behind the system bar while the browser
+     still reports a zero inset. `max()` picks whichever is larger, so
+     working insets are never double-counted. */
+  --sab-min: 0px;
+}
+
+@media (pointer: coarse) and (hover: none) {
+  :root {
+    --sab-min: 3rem;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -45,6 +59,11 @@ button, input {
   overflow: hidden;
   min-height: 0;
   padding-bottom: 0;
+  /* With viewport-fit=cover the page extends under the status bar and
+     side notches: keep the whole shell inside the safe region. */
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
 }
 
 .sidebar {
@@ -438,7 +457,7 @@ button, input {
   gap: 0.4rem;
   background: rgba(17, 24, 39, 0.96);
   border-top: 1px solid var(--border);
-  padding: 0.75rem 1.25rem max(0.5rem, var(--safe-bottom, 0px));
+  padding: 0.75rem 1.25rem calc(0.5rem + max(var(--sab), var(--sab-min)));
   backdrop-filter: blur(8px);
   min-height: 100px;
   margin-top: 0;
@@ -547,7 +566,7 @@ button, input {
 
 .now-playing-bar.compact {
   gap: 0.45rem;
-  padding: 0.45rem 0.6rem max(0.25rem, var(--safe-bottom, 0px));
+  padding: 0.45rem 0.6rem calc(0.25rem + max(var(--sab), var(--sab-min)));
 }
 
 .now-playing-bar.compact .now-playing-main-row {
@@ -826,7 +845,7 @@ button, input {
 
   .now-playing-bar {
     min-height: 82px;
-    padding: 0.55rem 0.8rem;
+    padding: 0.55rem 0.8rem calc(0.55rem + max(var(--sab), var(--sab-min)));
   }
 
   .favorite-current {
@@ -858,13 +877,16 @@ button, input {
 @media (max-width: 768px) {
   .app-shell {
     flex-direction: column;
-    height: 100vh;
+    /* Must use the measured limiter, not raw 100vh: on edge-to-edge mobile
+       browsers 100vh includes the area behind the system bars, stretching the
+       shell (and the bottom-anchored player) underneath them. */
+    height: var(--viewport-height);
     overflow: hidden;
   }
 
   body {
     overflow: hidden;
-    height: 100vh;
+    height: var(--viewport-height);
   }
 
   .menu-toggle {
@@ -876,7 +898,7 @@ button, input {
     top: 3.5rem;
     left: 0;
     width: 280px;
-    height: calc(100vh - 3.5rem);
+    height: calc(var(--viewport-height) - 3.5rem);
     border-right: 1px solid var(--border);
     border-top: 1px solid var(--border);
     border-bottom: none;
@@ -1029,8 +1051,8 @@ button, input {
   .now-playing-bar {
     grid-template-columns: 40px 1fr 44px;
     gap: 0.4rem;
-    padding: 0.4rem;
-    max-height: 75px;
+    padding: 0.4rem 0.4rem calc(0.4rem + max(var(--sab), var(--sab-min)));
+    max-height: calc(75px + max(var(--sab), var(--sab-min)));
   }
 
   .favorite-current {

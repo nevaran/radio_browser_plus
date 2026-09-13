@@ -61,7 +61,7 @@ pub fn App() -> impl IntoView {
 
 /// One-time startup: viewport fix, initial route, session restore, listeners.
 fn init_app(state: AppState) {
-    update_viewport_safe_area();
+    update_viewport_height();
     state.apply_hash();
 
     // Restore session. Without one the backend rejects every data request,
@@ -105,7 +105,7 @@ fn init_app(state: AppState) {
     {
         let state = state.clone();
         let on_resize = Closure::wrap(Box::new(move || {
-            update_viewport_safe_area();
+            update_viewport_height();
             state.resize_tick.update(|t| *t += 1);
         }) as Box<dyn Fn()>);
         if let Some(window) = web_sys::window() {
@@ -191,8 +191,13 @@ fn init_app(state: AppState) {
     }
 }
 
-/// Mobile-browser-chrome workaround: pin layout heights through CSS vars.
-fn update_viewport_safe_area() {
+/// Mobile-browser-chrome workaround: pin layout heights to the real layout
+/// viewport height (`documentElement.clientHeight`), so URL-bar show/hide
+/// cycles can't stretch the app shell under the system UI.
+/// System-bar insets (notch, gesture/navigation bar) are handled purely in
+/// CSS via `env(safe-area-inset-*)` + `viewport-fit=cover` — the browser
+/// reports the real numbers, no JS guesswork needed.
+fn update_viewport_height() {
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -210,19 +215,10 @@ fn update_viewport_safe_area() {
         .ok()
         .and_then(|v| v.as_f64())
         .unwrap_or(1024.0);
-    let inner_h = window
-        .inner_height()
-        .ok()
-        .and_then(|v| v.as_f64())
-        .unwrap_or(768.0);
     let client_h = f64::from(root.client_height()).max(1.0);
-    let inset = (inner_h - client_h).max(0.0);
 
     let style = root.style();
     let _ = style.set_property("--viewport-height", &format!("{client_h}px"));
-    let _ = style.set_property("--safe-top", "0px");
-    let _ = style.set_property("--safe-bottom", &format!("{inset}px"));
-    let _ = style.set_property("--mobile-bottom-gap", &format!("{inset}px"));
 
     if let Some(body) = document.body() {
         let body_style = body.style();

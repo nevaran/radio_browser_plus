@@ -52,6 +52,12 @@ async fn main() {
     let radio_client = RadioBrowserClient::new(None);
     let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
     info!(data_dir = %data_dir, "Using data directory");
+    let allow_guest = allow_guest_access();
+    if allow_guest {
+        tracing::warn!("ALLOW_GUEST_ACCESS is enabled: the app can be browsed without logging in");
+    } else {
+        info!("Guest access disabled: sign-in required");
+    }
     let auth = Arc::new(AuthService::new(&data_dir));
     auth.ensure_default_admin("admin", "admin");
     if auth.admin_uses_default_password("admin", "admin") {
@@ -211,6 +217,16 @@ async fn main() {
                 async move { f.update(headers, body).await }
             }),
         )
+        // Public runtime config (guest mode flag) so the UI knows whether
+        // browsing without a session is allowed. Stays behind the auth
+        // layer like every /api route, but allowlisted inside it.
+        .route(
+            "/api/config",
+            get(move || {
+                let guest = allow_guest;
+                async move { Json(json!({ "allow_guest": guest })) }
+            }),
+        )
         // Unknown API paths must not fall through to the SPA shell: answer
         // with JSON 404 so API clients (and scanners) get a clear signal.
         // (Also behind the auth layer below, like every other /api route.)
@@ -224,7 +240,10 @@ async fn main() {
             }),
         )
         .route_layer(middleware::from_fn_with_state(
-            auth.clone(),
+            ApiAuth {
+                auth: auth.clone(),
+                allow_guest,
+            },
             require_auth,
         ));
 
@@ -288,24 +307,43 @@ async fn main() {
     });
 }
 
-// API routes that work without a session: sign-in itself and idempotent
-// sign-out. Everything else under /api requires authentication, so the app
-// cannot be used without logging in.
+// Whether anonymous browsing is allowed. Opt-in via ALLOW_GUEST_ACCESS=1
+// (also accepts true/yes/on); anything else, including unset, means login is
+// required. Parsed separately for unit testing without touching the env.
+fn parse_guest_flag(raw: Option<&str>) -> bool {
+    raw.is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn allow_guest_access() -> bool {
+    parse_guest_flag(env::var("ALLOW_GUEST_ACCESS").ok().as_deref())
+}
+
+/// Auth state shared with the API middleware.
+#[derive(Clone)]
+struct ApiAuth {
+    auth: Arc<AuthService>,
+    allow_guest: bool,
+}
+
+// API routes that work without a session: sign-in itself, idempotent
+// sign-out, and the public runtime config. Everything else under /api
+// requires authentication unless guest access is enabled, in which case the
+// UI browses anonymously (per-user features like favorites still need login).
 fn is_public_api_path(path: &str) -> bool {
-    matches!(path, "/api/login" | "/api/logout")
+    matches!(path, "/api/login" | "/api/logout" | "/api/config")
 }
 
 async fn require_auth(
-    State(auth): State<Arc<AuthService>>,
+    State(api_auth): State<ApiAuth>,
     headers: HeaderMap,
     req: Request,
     next: Next,
 ) -> Response {
-    if is_public_api_path(req.uri().path()) {
+    if api_auth.allow_guest || is_public_api_path(req.uri().path()) {
         return next.run(req).await;
     }
     let authorized = AuthService::extract_session_id(&headers)
-        .and_then(|id| auth.current_user_from_session(&id))
+        .and_then(|id| api_auth.auth.current_user_from_session(&id))
         .is_some();
     if !authorized {
         return (
@@ -319,12 +357,31 @@ async fn require_auth(
 
 #[cfg(test)]
 mod tests {
-    use super::is_public_api_path;
+    use super::{is_public_api_path, parse_guest_flag};
 
     #[test]
-    fn only_login_and_logout_are_public() {
+    fn guest_flag_defaults_to_off() {
+        for raw in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+            Some("2"),
+        ] {
+            assert!(!parse_guest_flag(raw), "{raw:?} must keep login required");
+        }
+        for raw in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
+            assert!(parse_guest_flag(Some(raw)), "{raw:?} must allow guests");
+        }
+    }
+
+    #[test]
+    fn only_login_logout_and_config_are_public() {
         assert!(is_public_api_path("/api/login"));
         assert!(is_public_api_path("/api/logout"));
+        assert!(is_public_api_path("/api/config"));
         for path in [
             "/api/me",
             "/api/users",

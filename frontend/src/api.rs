@@ -8,7 +8,9 @@ use gloo_net::http::Request;
 use serde::{de::DeserializeOwned, Serialize};
 use web_sys::RequestCredentials;
 
-use crate::models::{Country, FavoritePayload, FavoritesResponse, Language, Station, Tag, User};
+use crate::models::{
+    AppConfig, Country, FavoritePayload, FavoritesResponse, Language, Station, Tag, User,
+};
 
 async fn get_json<T: DeserializeOwned>(path: &str) -> Result<T, String> {
     let response = Request::get(path)
@@ -134,6 +136,10 @@ pub async fn fetch_stations_by_genre(genre: &str) -> Result<Vec<Station>, String
 
 pub async fn fetch_me() -> Result<User, String> {
     get_json("/api/me").await
+}
+
+pub async fn fetch_config() -> Result<AppConfig, String> {
+    get_json("/api/config").await
 }
 
 pub async fn login(username: &str, password: &str) -> Result<User, String> {

@@ -60,6 +60,9 @@ pub struct AppState {
     /// resolved. Until then `user == None` means "unknown", not "logged out",
     /// and must not trigger the login gate.
     pub session_checked: RwSignal<bool>,
+    /// True when the server allows anonymous browsing (`ALLOW_GUEST_ACCESS`).
+    /// Fetched once at startup from the public `/api/config`.
+    pub allow_guest: RwSignal<bool>,
     /// Currently open in-app dialog, if any (replaces `alert`/`confirm`).
     pub dialog: RwSignal<Option<AppDialog>>,
     pub player: Player,
@@ -89,6 +92,7 @@ impl AppState {
             metadata_refreshed: RwSignal::new(HashSet::new()),
             user: RwSignal::new(None),
             session_checked: RwSignal::new(false),
+            allow_guest: RwSignal::new(false),
             dialog: RwSignal::new(None),
             player,
             login_open: RwSignal::new(false),
@@ -113,7 +117,8 @@ impl AppState {
     }
 
     /// Central handler for authentication loss (rejected session, expiry):
-    /// drop local identity and block the UI behind the login dialog.
+    /// drop local identity and block the UI behind the login dialog — unless
+    /// guest browsing is allowed, in which case continue anonymously.
     pub fn handle_unauthorized(&self) {
         self.session_checked.set(true);
         self.user.set(None);
@@ -121,7 +126,8 @@ impl AppState {
         self.favorites_loaded.set(false);
         self.stations.set(Vec::new());
         self.collections.set(Vec::new());
-        self.login_open.set(true);
+        // Guest mode degrades to anonymous browsing instead of forcing sign-in.
+        self.login_open.set(!self.allow_guest.get_untracked());
     }
 
     /// Route API failures: an auth rejection locks the UI, anything else is
@@ -194,10 +200,6 @@ impl AppState {
                 }
             }
         }
-    }
-
-    pub fn is_favorite(&self, id: &str) -> bool {
-        self.favorites.get().contains_key(id)
     }
 
     pub fn toggle_favorite(&self, station: Station) {
@@ -343,8 +345,9 @@ impl AppState {
     // -- data loading ------------------------------------------------------
 
     /// Load the current view; stale in-flight responses are ignored.
-    /// Without a session there is nothing to load: the backend rejects every
-    /// data request, so clear the grids instead of firing doomed fetches.
+    /// Without a session there is nothing to load (unless guest browsing is
+    /// allowed): the backend rejects every data request, so clear the grids
+    /// instead of firing doomed fetches.
     /// While the session restore is still in flight the login state is
     /// unknown, so skip quietly (the restore triggers a load when done)
     /// instead of flashing the login dialog on every page load.
@@ -352,7 +355,7 @@ impl AppState {
         if !self.session_checked.get_untracked() {
             return;
         }
-        if !self.is_logged_in() {
+        if !self.is_logged_in() && !self.allow_guest.get_untracked() {
             self.stations.set(Vec::new());
             self.collections.set(Vec::new());
             self.login_open.set(true);

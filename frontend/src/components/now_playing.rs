@@ -45,6 +45,7 @@ pub fn NowPlaying() -> impl IntoView {
     let compact_bar = st.compact_bar;
     let resize_tick = st.resize_tick;
     let favorites = st.favorites;
+    let user = st.user;
 
     // Compact-mode detection: same overflow rule as the old UI. Re-runs when
     // the track changes or the viewport is resized.
@@ -73,6 +74,7 @@ pub fn NowPlaying() -> impl IntoView {
             >
                 <div class="now-playing-main-row">
                     <div class="now-playing-left">
+                        <Show when=move || user.with(|u| u.is_some())>
                         <button
                             id="favorite-current"
                             class="favorite-current"
@@ -95,6 +97,7 @@ pub fn NowPlaying() -> impl IntoView {
                         >
                             {move || if current_is_favorite(current, favorites) { "★" } else { "☆" }}
                         </button>
+                        </Show>
                         <div class="now-playing-icon-section">
                             <img
                                 id="now-playing-icon"

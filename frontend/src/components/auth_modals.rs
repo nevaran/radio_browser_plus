@@ -10,13 +10,15 @@ use crate::state::AppState;
 
 /// Shared dialog shell: backdrop, centered content, titled header. The form
 /// body differs per dialog and arrives as children. Dismissal (backdrop and
-/// ×) stays blocked while logged out so the login dialog cannot be bypassed.
+/// ×) stays blocked while logged out so the login dialog cannot be bypassed —
+/// except in guest mode, where a voluntarily opened dialog must stay closable.
 #[component]
 fn ModalShell(
     modal_id: &'static str,
     title: &'static str,
     open: RwSignal<bool>,
     user: RwSignal<Option<crate::models::User>>,
+    allow_guest: RwSignal<bool>,
     children: ChildrenFn,
 ) -> impl IntoView {
     let title_id = format!("{modal_id}-title");
@@ -26,7 +28,7 @@ fn ModalShell(
             <div
                 class="auth-modal-backdrop"
                 on:click=move |_| {
-                    if user.with(|u| u.is_some()) {
+                    if user.with(|u| u.is_some()) || allow_guest.get() {
                         open.set(false);
                     }
                 }
@@ -45,7 +47,7 @@ fn ModalShell(
                         data-close=modal_id
                         aria-label="Close"
                         on:click=move |_| {
-                            if user.with(|u| u.is_some()) {
+                            if user.with(|u| u.is_some()) || allow_guest.get() {
                                 open.set(false);
                             }
                         }
@@ -65,6 +67,7 @@ pub fn LoginModal() -> impl IntoView {
     let store = StoredValue::new(st.clone());
     let login_open = st.login_open;
     let user = st.user;
+    let allow_guest = st.allow_guest;
     let user_ref = NodeRef::<Input>::new();
     let pass_ref = NodeRef::<Input>::new();
 
@@ -75,6 +78,7 @@ pub fn LoginModal() -> impl IntoView {
                 title="Sign in"
                 open=login_open
                 user=user
+                allow_guest=allow_guest
             >
                     <form
                         id="login-form"
@@ -141,6 +145,7 @@ pub fn CreateUserModal() -> impl IntoView {
     let store = StoredValue::new(st.clone());
     let create_user_open = st.create_user_open;
     let user = st.user;
+    let allow_guest = st.allow_guest;
     let user_ref = NodeRef::<Input>::new();
     let pass_ref = NodeRef::<Input>::new();
     let role_ref = NodeRef::<Select>::new();
@@ -155,6 +160,7 @@ pub fn CreateUserModal() -> impl IntoView {
                 title="Create User"
                 open=create_user_open
                 user=user
+                allow_guest=allow_guest
             >
                     <form
                         id="create-user-form"
@@ -240,6 +246,7 @@ pub fn ChangePasswordModal() -> impl IntoView {
     let store = StoredValue::new(st.clone());
     let change_password_open = st.change_password_open;
     let user = st.user;
+    let allow_guest = st.allow_guest;
     let current_ref = NodeRef::<Input>::new();
     let new_ref = NodeRef::<Input>::new();
 
@@ -250,6 +257,7 @@ pub fn ChangePasswordModal() -> impl IntoView {
                 title="Change Password"
                 open=change_password_open
                 user=user
+                allow_guest=allow_guest
             >
                     <form
                         id="change-password-form"

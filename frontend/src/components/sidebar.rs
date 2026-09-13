@@ -9,32 +9,36 @@ use leptos::prelude::*;
 use crate::state::AppState;
 
 #[component]
-pub fn Sidebar() -> impl IntoView {
+fn NavButton(view_name: &'static str, label: &'static str) -> impl IntoView {
     let st = use_context::<AppState>().expect("AppState provided");
     let store = StoredValue::new(st.clone());
     let view = st.view;
+    let sidebar_open = st.sidebar_open;
+    view! {
+        <button
+            class="nav"
+            class:active=move || view.get() == view_name
+            data-view=view_name
+            on:click=move |_| {
+                sidebar_open.set(false);
+                store.with_value(|s| s.navigate(view_name, None));
+            }
+        >
+            {label}
+        </button>
+    }
+}
+
+#[component]
+pub fn Sidebar() -> impl IntoView {
+    let st = use_context::<AppState>().expect("AppState provided");
+    let store = StoredValue::new(st.clone());
     let user = st.user;
     let sidebar_open = st.sidebar_open;
     let login_open = st.login_open;
     let change_password_open = st.change_password_open;
     let create_user_open = st.create_user_open;
     let search_ref = NodeRef::<Input>::new();
-
-    let nav = |view_name: &'static str, label: &'static str| {
-        view! {
-            <button
-                class="nav"
-                class:active=move || view.get() == view_name
-                data-view=view_name
-                on:click=move |_| {
-                    sidebar_open.set(false);
-                    store.with_value(|s| s.navigate(view_name, None));
-                }
-            >
-                {label}
-            </button>
-        }
-    };
 
     let on_search_input = move |_| {
         if let Some(input) = search_ref.get() {
@@ -54,12 +58,14 @@ pub fn Sidebar() -> impl IntoView {
         <aside class="sidebar" id="sidebar" class:open=move || sidebar_open.get()>
             <h1>"Radio Browser Plus"</h1>
             <div class="nav-group">
-                {nav("all", "All stations")}
-                {nav("popular", "Popular")}
-                {nav("favorites", "Favorites")}
-                {nav("countries", "Countries")}
-                {nav("languages", "Languages")}
-                {nav("genres", "Genres")}
+                <NavButton view_name="all" label="All stations" />
+                <NavButton view_name="popular" label="Popular" />
+                <Show when=move || user.with(|u| u.is_some())>
+                    <NavButton view_name="favorites" label="Favorites" />
+                </Show>
+                <NavButton view_name="countries" label="Countries" />
+                <NavButton view_name="languages" label="Languages" />
+                <NavButton view_name="genres" label="Genres" />
             </div>
 
             <div class="search-box">
@@ -100,7 +106,12 @@ pub fn Sidebar() -> impl IntoView {
                                         s.user.set(None);
                                         s.favorites.set(Default::default());
                                         s.favorites_loaded.set(false);
-                                        s.login_open.set(true);
+                                        if s.allow_guest.get_untracked() {
+                                            // Stay in the app as a guest.
+                                            s.load_view();
+                                        } else {
+                                            s.login_open.set(true);
+                                        }
                                     });
                                 });
                             }

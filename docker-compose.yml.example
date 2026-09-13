@@ -4,10 +4,13 @@ services:
     container_name: radio-browser-plus
     # No published ports: traffic arrives via the reverse proxy network below.
     # The app itself speaks plain HTTP on 8000; terminate TLS at the proxy.
+#    ports:
+#      - '8000:8000'
     volumes:
       - ./data:/app/data
     environment:
       - RADIO_BROWSER_STATION_LIMIT=${RADIO_BROWSER_STATION_LIMIT:-1000}
+      - ALLOW_GUEST_ACCESS=${ALLOW_GUEST_ACCESS:-0}
       - RUST_LOG=info
       - RUST_BACKTRACE=0
     user: "${UID:-1000}:${GID:-1000}"

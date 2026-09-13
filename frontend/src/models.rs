@@ -161,6 +161,14 @@ pub struct User {
     pub role: String,
 }
 
+/// Public runtime config from `/api/config`. Unknown fields are ignored so
+/// older frontends keep working against newer backends and vice versa.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub allow_guest: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FavoritePayload {
     pub station_id: String,

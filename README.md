@@ -104,6 +104,11 @@ Then open the URL printed by Trunk (port 8080 by default).
 All API endpoints except sign-in/sign-out require authentication, and the web
 UI blocks usage behind the sign-in dialog until you are logged in.
 
+To allow anonymous browsing, set `ALLOW_GUEST_ACCESS=1`. Guests can browse,
+search, and play stations without an account, but account management and
+favorites stay hidden until they sign in. The default (`0`/unset) requires
+login for everything.
+
 ## Usage
 
 After signing in, browse popular stations, search the Radio Browser catalog,

@@ -19,42 +19,53 @@ fn StationCard(station: Station) -> impl IntoView {
     let meta = format!("{country} · {}", format_bitrate(station.bitrate));
     let name = truncate_name(&station.name, 50);
 
-    let fav_state = state.clone();
-    let fav_id = id.clone();
-    let play_state = state.clone();
+    // Only `Copy` handles cross the `Show` boundary below (a `Show`'s
+    // children must stay `Fn`, so nothing non-`Copy` may move out of them):
+    // signals/StoredValue for reactive reads, plain owned values at top level.
+    let store = StoredValue::new(state.clone());
+    let user = state.user;
+    let favorites = state.favorites;
     let play_station = station.clone();
-    let toggle_state = state.clone();
-    let toggle_station = station.clone();
+    let image_src = primary_image(&station);
+    let station_store = StoredValue::new(station);
+    let fav_id = StoredValue::new(id.clone());
     let article_id = id.clone();
-    let button_id = id.clone();
+    let button_id = id;
 
     view! {
         <article
             class="station-card"
-            class:favorite=move || fav_state.is_favorite(&fav_id)
+            class:favorite=move || fav_id.with_value(|fid| favorites.with(|m| m.contains_key(fid)))
             data-station=article_id
             on:click=move |_| {
                 let current_id = station_id(&play_station);
-                play_state.player.play(play_station.clone());
-                if current_id.is_some_and(|id| play_state.favorites.get_untracked().contains_key(&id)) {
-                    play_state.refresh_favorite_metadata(play_station.clone());
-                }
+                store.with_value(|s| {
+                    s.player.play(play_station.clone());
+                    if current_id
+                        .is_some_and(|sid| s.favorites.get_untracked().contains_key(&sid))
+                    {
+                        s.refresh_favorite_metadata(play_station.clone());
+                    }
+                });
             }
         >
+            <Show when=move || user.with(|u| u.is_some())>
             <button
                 class="favorite-button"
-                data-favorite=button_id
+                data-favorite=button_id.clone()
                 aria-label="Toggle favorite"
                 on:click=move |ev| {
                     ev.stop_propagation();
-                    toggle_state.toggle_favorite(toggle_station.clone());
+                    let station = station_store.get_value();
+                    store.with_value(|s| s.toggle_favorite(station));
                 }
             >
-                {move || if state.is_favorite(&id) { "★" } else { "☆" }}
+                {move || if fav_id.with_value(|fid| favorites.with(|m| m.contains_key(fid))) { "★" } else { "☆" }}
             </button>
+            </Show>
             <div class="card-art">
                 <img
-                    src=primary_image(&station)
+                    src=image_src
                     alt=name.clone()
                     loading="lazy"
                     decoding="async"

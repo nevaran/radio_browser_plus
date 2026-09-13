@@ -64,13 +64,19 @@ fn init_app(state: AppState) {
     update_viewport_height();
     state.apply_hash();
 
-    // Restore session. Without one the backend rejects every data request,
-    // so a failed restore locks the UI behind the login dialog; a restored
-    // session always (re)loads the view because the initial load is skipped
-    // while logged out.
+    // Runtime config first (public): it decides whether anonymous browsing
+    // is allowed. A failed fetch keeps the fail-closed default (off).
+    // Then restore the session. Without one the backend rejects every data
+    // request, so a failed restore locks the UI behind the login dialog —
+    // unless guest browsing is allowed, in which case the view loads
+    // anonymously. A restored session always (re)loads the view because the
+    // initial load is skipped while logged out.
     {
         let state = state.clone();
         leptos::task::spawn_local(async move {
+            if let Ok(config) = crate::api::fetch_config().await {
+                state.allow_guest.set(config.allow_guest);
+            }
             match crate::api::fetch_me().await {
                 Ok(user) => {
                     state.session_checked.set(true);
@@ -81,8 +87,12 @@ fn init_app(state: AppState) {
                 // A login submitted while the restore was in flight wins:
                 // never wipe an established session with a stale failure.
                 Err(_) => {
-                    if !state.is_logged_in() {
-                        state.handle_unauthorized();
+                    if state.is_logged_in() {
+                        return;
+                    }
+                    state.handle_unauthorized();
+                    if state.allow_guest.get_untracked() {
+                        state.load_view();
                     }
                 }
             }

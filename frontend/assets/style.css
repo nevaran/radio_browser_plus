@@ -640,6 +640,22 @@ button, input {
   display: none;
 }
 
+.now-playing-bar.compact .transport-controls {
+  gap: 0.25rem;
+  order: 2;
+  flex-shrink: 0;
+}
+
+.now-playing-bar.compact .transport-controls .play-stop-container {
+  order: 0;
+}
+
+.now-playing-bar.compact .skip-btn {
+  width: 32px;
+  height: 30px;
+  font-size: 0.8rem;
+}
+
 .now-playing-bar.compact .now-playing-controls {
   justify-self: end;
   min-width: 0;
@@ -650,20 +666,35 @@ button, input {
 .now-playing-bar.compact .volume-control {
   gap: 0.25rem;
   margin-left: auto;
-  flex: 0 0 auto;
-  width: 112px;
+  /* Hug the content instead of a fixed 112px box: the old fixed width was
+     narrower than icon + slider + label combined, so the "100%" label spilled
+     past the bar and was clipped by the viewport edge. */
+  flex: 0 1 auto;
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.now-playing-bar.compact .volume-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
 }
 
 .now-playing-bar.compact .volume-slider {
-  width: 72px;
-  flex: 0 0 72px;
+  /* Preferred 64px; shrinks first if emoji/fonts run wide, never clips peers. */
+  flex: 0 1 64px;
+  width: 64px;
+  min-width: 44px;
+  max-width: 72px;
 }
 
 .now-playing-bar.compact .volume-display {
-  min-width: 0;
-  width: 32px;
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 2.2em;
   font-size: 0.7rem;
   text-align: right;
+  white-space: nowrap;
 }
 
 .favorite-current {
@@ -792,6 +823,40 @@ button, input {
   align-items: center;
   justify-content: center;
   justify-self: center;
+}
+
+.transport-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  justify-self: center;
+}
+
+.skip-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease, opacity 0.15s ease;
+}
+
+.skip-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  transform: scale(1.06);
+}
+
+.skip-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .loading-spinner {
@@ -1065,6 +1130,16 @@ button, input {
     width: 40px;
     height: 32px;
     font-size: 0.9rem;
+  }
+
+  .transport-controls {
+    gap: 0.3rem;
+  }
+
+  .skip-btn {
+    width: 32px;
+    height: 28px;
+    font-size: 0.8rem;
   }
 
   .now-playing-name {

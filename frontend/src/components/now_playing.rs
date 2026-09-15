@@ -185,6 +185,19 @@ pub fn NowPlaying() -> impl IntoView {
                         </div>
                     </div>
 
+                    <div class="transport-controls">
+                        <button
+                            id="prev-btn"
+                            class="skip-btn"
+                            aria-label="Previous station"
+                            title="Previous station"
+                            prop:disabled=move || !store.with_value(|s| s.has_prev_next())
+                            on:click=move |_| {
+                                store.with_value(|s| s.play_previous());
+                            }
+                        >
+                            "⏮"
+                        </button>
                     <div class="play-stop-container">
                         <button
                             id="play-stop-btn"
@@ -208,6 +221,19 @@ pub fn NowPlaying() -> impl IntoView {
                         <Show when=move || loading.get()>
                             <div id="loading-spinner" class="loading-spinner"></div>
                         </Show>
+                    </div>
+                        <button
+                            id="next-btn"
+                            class="skip-btn"
+                            aria-label="Next station"
+                            title="Next station"
+                            prop:disabled=move || !store.with_value(|s| s.has_prev_next())
+                            on:click=move |_| {
+                                store.with_value(|s| s.play_next());
+                            }
+                        >
+                            "⏭"
+                        </button>
                     </div>
 
                     <div class="now-playing-controls">

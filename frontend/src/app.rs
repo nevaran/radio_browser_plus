@@ -167,7 +167,31 @@ fn init_app(state: AppState) {
                     }
                 }
             }
-            if ev.key().to_lowercase() == "m" {
+            // Media keys on keyboards that surface as key events (most OS
+            // media keys arrive via the Media Session handlers below instead).
+            let code = ev.code();
+            let key = ev.key();
+            let is = |name: &str| code == name || key == name;
+            if is("MediaTrackNext") {
+                ev.prevent_default();
+                state.play_next();
+            } else if is("MediaTrackPrevious") {
+                ev.prevent_default();
+                state.play_previous();
+            } else if is("MediaPlayPause") {
+                ev.prevent_default();
+                if state.player.is_playing.get_untracked() {
+                    state.player.pause();
+                } else {
+                    state.player.resume();
+                }
+            } else if is("MediaPlay") {
+                ev.prevent_default();
+                state.player.resume();
+            } else if is("MediaPause") || is("MediaStop") {
+                ev.prevent_default();
+                state.player.pause();
+            } else if ev.key().to_lowercase() == "m" {
                 ev.prevent_default();
                 state.player.toggle_mute();
             } else if ev.code() == "Space" {
@@ -198,6 +222,37 @@ fn init_app(state: AppState) {
     {
         let state = state.clone();
         Interval::new(STATION_REFRESH_MS, move || state.load_view()).forget();
+    }
+
+    // OS media controls (lock screen, headset / keyboard media keys): the
+    // handlers step within the list the current station was started from.
+    {
+        let play = state.clone();
+        let pause = state.clone();
+        let prev = state.clone();
+        let next = state.clone();
+        crate::media::init_media_handlers(
+            move || play.player.resume(),
+            move || pause.player.pause(),
+            move || prev.play_previous(),
+            move || next.play_next(),
+        );
+    }
+
+    // Mirror player state to the OS: track metadata on station change,
+    // play/pause state on transport change. No-ops where unsupported.
+    {
+        let current = state.clone();
+        Effect::new(move || match current.player.current.get() {
+            Some(station) => crate::media::update_media_metadata(&station),
+            None => crate::media::clear_media_metadata(),
+        });
+    }
+    {
+        let transport = state.clone();
+        Effect::new(move || {
+            crate::media::update_playback_state(transport.player.is_playing.get());
+        });
     }
 }
 

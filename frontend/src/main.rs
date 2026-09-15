@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod components;
+mod media;
 mod models;
 mod player;
 mod state;

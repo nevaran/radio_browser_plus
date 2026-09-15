@@ -49,6 +49,11 @@ pub struct AppState {
     pub filter: RwSignal<Option<String>>,
     pub search_query: RwSignal<String>,
     pub stations: RwSignal<Vec<Station>>,
+    /// List the current station was started from, in display order. Previous /
+    /// next (UI buttons, keyboard, OS media keys) step within this list, so a
+    /// station started from Favorites stays in Favorites even after the
+    /// visible view changes. Captured on every direct (card) play.
+    pub queue: RwSignal<Vec<Station>>,
     pub collections: RwSignal<Vec<CollectionItem>>,
     pub collection_kind: RwSignal<String>,
     pub view_title: RwSignal<String>,
@@ -84,6 +89,7 @@ impl AppState {
             filter: RwSignal::new(None),
             search_query: RwSignal::new(String::new()),
             stations: RwSignal::new(Vec::new()),
+            queue: RwSignal::new(Vec::new()),
             collections: RwSignal::new(Vec::new()),
             collection_kind: RwSignal::new(String::new()),
             view_title: RwSignal::new("All stations".to_string()),
@@ -125,6 +131,7 @@ impl AppState {
         self.favorites.set(Default::default());
         self.favorites_loaded.set(false);
         self.stations.set(Vec::new());
+        self.queue.set(Vec::new());
         self.collections.set(Vec::new());
         // Guest mode degrades to anonymous browsing instead of forcing sign-in.
         self.login_open.set(!self.allow_guest.get_untracked());
@@ -288,6 +295,104 @@ impl AppState {
                 this.favorites.set(resp.favorites);
             }
         });
+    }
+
+    // -- playback queue (previous / next) ----------------------------------
+
+    /// Direct play from a station card: capture the visible list as the
+    /// navigation context, then start playback. The queue preserves display
+    /// order, so previous / next follow what the user saw.
+    pub fn play_from_visible_list(&self, station: Station) {
+        let visible = self.stations.get_untracked();
+        if !visible.is_empty() {
+            self.queue.set(visible);
+        }
+        self.play_queued(station);
+    }
+
+    /// Step to the next station in the originating list (wraps around).
+    pub fn play_next(&self) {
+        self.step_queue(1);
+    }
+
+    /// Step to the previous station in the originating list (wraps around).
+    pub fn play_previous(&self) {
+        self.step_queue(-1);
+    }
+
+    /// Whether a previous / next step has anywhere to go (2+ stations in the
+    /// effective list). Uses tracked reads so views re-render on change.
+    pub fn has_prev_next(&self) -> bool {
+        let queued = self.queue.get();
+        let current_id = self.player.current.get().as_ref().and_then(station_id);
+        if let Some(ref id) = current_id {
+            if queued.iter().any(|s| station_id(s).as_deref() == Some(id)) {
+                return queued.len() > 1;
+            }
+            let visible = self.stations.get();
+            if visible.iter().any(|s| station_id(s).as_deref() == Some(id)) {
+                return visible.len() > 1;
+            }
+        }
+        if !queued.is_empty() {
+            return queued.len() > 1;
+        }
+        self.stations.get().len() > 1
+    }
+
+    /// The list a prev / next step would walk: the captured queue when it
+    /// still contains the current station, otherwise the visible list (the
+    /// view may have changed or refreshed since playback started).
+    fn effective_queue(&self) -> Vec<Station> {
+        let queued = self.queue.get_untracked();
+        let current_id = self
+            .player
+            .current
+            .get_untracked()
+            .as_ref()
+            .and_then(station_id);
+        if let Some(ref id) = current_id {
+            if queued.iter().any(|s| station_id(s).as_deref() == Some(id)) {
+                return queued;
+            }
+            let visible = self.stations.get_untracked();
+            if visible.iter().any(|s| station_id(s).as_deref() == Some(id)) {
+                return visible;
+            }
+        }
+        if !queued.is_empty() {
+            return queued;
+        }
+        self.stations.get_untracked()
+    }
+
+    fn step_queue(&self, delta: isize) {
+        let list = self.effective_queue();
+        let Some(next) = pick_neighbor(&list, self.current_station_id().as_deref(), delta) else {
+            return;
+        };
+        // A view change may have re-resolved the queue: keep the adopted list
+        // so repeated steps stay in the same context.
+        if self.queue.get_untracked().is_empty()
+            || self
+                .current_station_id()
+                .is_none_or(|id| !queue_contains(&self.queue.get_untracked(), &id))
+        {
+            self.queue.set(list);
+        }
+        self.play_queued(next);
+    }
+
+    fn current_station_id(&self) -> Option<String> {
+        self.player.current.get_untracked().as_ref().and_then(station_id)
+    }
+
+    fn play_queued(&self, station: Station) {
+        let id = station_id(&station);
+        self.player.play(station.clone());
+        if id.is_some_and(|sid| self.favorites.get_untracked().contains_key(&sid)) {
+            self.refresh_favorite_metadata(station);
+        }
     }
 
     // -- routing -----------------------------------------------------------
@@ -686,5 +791,82 @@ fn hex(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+/// Previous / next pick within a station list, with wraparound. Returns
+/// `None` for an empty list or a single-station list already playing (stepping
+/// would only reconnect the same stream).
+fn pick_neighbor(
+    list: &[Station],
+    current_id: Option<&str>,
+    delta: isize,
+) -> Option<Station> {
+    if list.is_empty() {
+        return None;
+    }
+    let len = list.len() as isize;
+    match current_id.and_then(|id| list.iter().position(|s| station_id(s).as_deref() == Some(id))) {
+        Some(index) => {
+            if list.len() == 1 {
+                return None;
+            }
+            let next = (index as isize + delta).rem_euclid(len) as usize;
+            list.get(next).cloned()
+        }
+        // Current station unknown (stale queue, cleared player): start at the
+        // head for next, at the tail for previous.
+        None => {
+            let next = if delta >= 0 { 0 } else { (len - 1) as usize };
+            list.get(next).cloned()
+        }
+    }
+}
+
+fn queue_contains(list: &[Station], id: &str) -> bool {
+    list.iter().any(|s| station_id(s).as_deref() == Some(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn station_with_id(id: &str) -> Station {
+        Station {
+            stationuuid: id.to_string(),
+            name: id.to_string(),
+            ..Station::default()
+        }
+    }
+
+    fn list(ids: &[&str]) -> Vec<Station> {
+        ids.iter().map(|id| station_with_id(id)).collect()
+    }
+
+    #[test]
+    fn neighbor_steps_with_wraparound() {
+        let stations = list(&["a", "b", "c"]);
+        assert_eq!(pick_neighbor(&stations, Some("a"), 1).unwrap().name, "b");
+        assert_eq!(pick_neighbor(&stations, Some("c"), 1).unwrap().name, "a");
+        assert_eq!(pick_neighbor(&stations, Some("a"), -1).unwrap().name, "c");
+        assert_eq!(pick_neighbor(&stations, Some("b"), -1).unwrap().name, "a");
+    }
+
+    #[test]
+    fn neighbor_without_current_starts_at_head_or_tail() {
+        let stations = list(&["a", "b"]);
+        assert_eq!(pick_neighbor(&stations, None, 1).unwrap().name, "a");
+        assert_eq!(pick_neighbor(&stations, None, -1).unwrap().name, "b");
+        assert_eq!(pick_neighbor(&stations, Some("missing"), 1).unwrap().name, "a");
+    }
+
+    #[test]
+    fn neighbor_empty_or_singleton() {
+        assert!(pick_neighbor(&[], Some("a"), 1).is_none());
+        let one = list(&["a"]);
+        assert!(pick_neighbor(&one, Some("a"), 1).is_none());
+        assert!(pick_neighbor(&one, Some("a"), -1).is_none());
+        // Unknown current still resolves into the only entry.
+        assert_eq!(pick_neighbor(&one, None, 1).unwrap().name, "a");
     }
 }

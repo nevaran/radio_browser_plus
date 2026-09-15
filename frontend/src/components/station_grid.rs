@@ -38,14 +38,8 @@ fn StationCard(station: Station) -> impl IntoView {
             class:favorite=move || fav_id.with_value(|fid| favorites.with(|m| m.contains_key(fid)))
             data-station=article_id
             on:click=move |_| {
-                let current_id = station_id(&play_station);
                 store.with_value(|s| {
-                    s.player.play(play_station.clone());
-                    if current_id
-                        .is_some_and(|sid| s.favorites.get_untracked().contains_key(&sid))
-                    {
-                        s.refresh_favorite_metadata(play_station.clone());
-                    }
+                    s.play_from_visible_list(play_station.clone());
                 });
             }
         >

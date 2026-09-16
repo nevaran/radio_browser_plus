@@ -69,7 +69,6 @@ pub fn Sidebar() -> impl IntoView {
             </div>
 
             <div class="search-box">
-                <div class="section-divider">"Search"</div>
                 <input
                     id="search"
                     type="search"
@@ -142,7 +141,7 @@ pub fn Sidebar() -> impl IntoView {
                     <div class="section-divider">"Admin"</div>
                     <button
                         id="create-user-button"
-                        class="side-action side-action-half admin-side-action"
+                        class="side-action admin-side-action"
                         on:click=move |_| create_user_open.set(true)
                     >
                         "Create User"

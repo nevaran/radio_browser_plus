@@ -134,10 +134,8 @@ pub fn NowPlaying() -> impl IntoView {
                                         .with(|c| {
                                             c.as_ref().map(|s| {
                                                 let (height, hue, lightness, _) = status_score(s);
-                                                let lightness2 = lightness.min(72) + 10;
                                                 format!(
-                                                    "height:{height}%;background:linear-gradient(to top, hsl({hue} 85% {lightness}% / 0.95), hsl({} 90% {lightness2}% / 0.9));box-shadow:0 0 10px hsl({hue} 85% {lightness}% / 0.55)",
-                                                    hue + 20,
+                                                    "height:{height}%;background:hsl({hue} 85% {lightness}%);box-shadow:0 0 10px hsl({hue} 85% {lightness}% / 0.55)",
                                                 )
                                             })
                                         })

@@ -254,6 +254,21 @@ fn init_app(state: AppState) {
             crate::media::update_playback_state(transport.player.is_playing.get());
         });
     }
+
+    // Reconnect immediately when connectivity returns (e.g. wifi -> mobile
+    // handover): the stall watchdog would catch it eventually, but the OS
+    // tells us exactly when the new network is up.
+    {
+        let state = state.clone();
+        let on_online = Closure::wrap(Box::new(move || {
+            state.reconnect();
+        }) as Box<dyn Fn()>);
+        if let Some(window) = web_sys::window() {
+            let _ =
+                window.add_event_listener_with_callback("online", on_online.as_ref().unchecked_ref());
+        }
+        on_online.forget();
+    }
 }
 
 /// Mobile-browser-chrome workaround: pin layout heights to the real layout

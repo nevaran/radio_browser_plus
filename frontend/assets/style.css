@@ -1179,24 +1179,29 @@ a:focus-visible {
 
 .loading-spinner {
   position: absolute;
-  /* Center explicitly (no offsets relied on static position) and paint above
-     the play button, which sits at z-index 2: the ring hugs/overlaps the
-     button face instead of hiding behind it. */
-  inset: 0;
-  margin: auto;
+  /* Same centering technique as the play button itself (left/top 50% +
+     translate), so ring and button are concentric by construction. The
+     translate lives inside the keyframes too, so the rotation can never
+     clobber the centering. Paints above the button (z-index 2). */
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   z-index: 3;
   width: 52px;
   height: 52px;
   border: 4px solid rgba(56, 189, 248, 0.2);
   border-top-color: #38bdf8;
   border-radius: 50%;
-  animation: spin 0.9s linear infinite;
+  animation: spin-around 0.9s linear infinite;
   pointer-events: none;
 }
 
-@keyframes spin {
+@keyframes spin-around {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
   to {
-    transform: rotate(360deg);
+    transform: translate(-50%, -50%) rotate(360deg);
   }
 }
 
@@ -1247,6 +1252,11 @@ a:focus-visible {
   #play-stop-btn {
     width: 46px;
     height: 38px;
+  }
+
+  .loading-spinner {
+    width: 46px;
+    height: 46px;
   }
 
   .transport-controls {
@@ -1478,6 +1488,13 @@ a:focus-visible {
     height: 32px;
     font-size: 0.9rem;
     border-radius: 10px;
+  }
+
+  /* Applies only when not compact: `.compact .loading-spinner` (44px) has
+     higher specificity and keeps winning on compact phones. */
+  .loading-spinner {
+    width: 40px;
+    height: 40px;
   }
 
   .now-playing-name {

@@ -5,6 +5,13 @@
 //! a dedicated `wants_playing` flag tracks playback intent, so the configured
 //! 5 × 3s retry chain actually works.
 //!
+//! Two additions for network outages (e.g. wifi-to-mobile handover):
+//! - a stall watchdog reconnects on *silent* starvation (dead socket, no
+//!   error event — just `waiting`/`stalled` with no data flow) and re-arms,
+//!   so recovery keeps going until the user pauses;
+//! - `reconnect()` re-establishes the current source immediately, wired to
+//!   the OS `online` event in `app.rs`.
+//!
 //! Station switches are gapless: the previous stream keeps playing until the
 //! new one fires its first `playing` event, and `is_playing` stays true
 //! throughout, so there is neither a silence gap nor a play-button flicker.
@@ -24,6 +31,9 @@ const VOLUME_KEY: &str = "radio-browser-plus-volume";
 const MUTED_KEY: &str = "radio-browser-plus-muted";
 const MAX_RETRIES: u32 = 5;
 const RETRY_DELAY_MS: u32 = 3000;
+/// Starvation window: no data flow for this long while playback is wanted
+/// forces a fresh connection (see `arm_stall_watchdog`).
+const STALL_WINDOW_MS: u32 = 12_000;
 
 #[derive(Clone)]
 pub struct Player {
@@ -41,6 +51,11 @@ pub struct Player {
     previous: Arc<Mutex<Option<HtmlAudioElement>>>,
     retry_attempt: Arc<Mutex<u32>>,
     retry_gen: Arc<Mutex<u64>>,
+    /// Bumped on any sign of live data flow (`playing`/`progress`/`canplay`
+    /// / successful `play()`); the stall watchdog compares against it.
+    flow_tick: Arc<Mutex<u64>>,
+    /// Generation counter ensuring a single stall watchdog at a time.
+    stall_gen: Arc<Mutex<u64>>,
 }
 
 impl Player {
@@ -58,12 +73,58 @@ impl Player {
             previous: Arc::new(Mutex::new(None)),
             retry_attempt: Arc::new(Mutex::new(0)),
             retry_gen: Arc::new(Mutex::new(0)),
+            flow_tick: Arc::new(Mutex::new(0)),
+            stall_gen: Arc::new(Mutex::new(0)),
         }
     }
 
     fn cancel_retry(&self) {
         *self.retry_gen.lock().unwrap() += 1;
         *self.retry_attempt.lock().unwrap() = 0;
+    }
+
+    fn note_flow(&self) {
+        *self.flow_tick.lock().unwrap() += 1;
+    }
+
+    /// Watch for a silent stall (no data flow, no error event — the classic
+    /// wifi-to-mobile handover: the socket dies quietly and the element just
+    /// starves). If nothing flows for the whole window while playback is
+    /// wanted, force a fresh connection, then re-arm so a persistent outage
+    /// keeps recovering on its own until the user pauses. Single-flight via
+    /// `stall_gen`; any data flow cancels it via `flow_tick`.
+    fn arm_stall_watchdog(&self) {
+        *self.stall_gen.lock().unwrap() += 1;
+        let gen = *self.stall_gen.lock().unwrap();
+        let flow = *self.flow_tick.lock().unwrap();
+        let this = self.clone();
+        leptos::task::spawn_local(async move {
+            TimeoutFuture::new(STALL_WINDOW_MS).await;
+            if *this.stall_gen.lock().unwrap() != gen {
+                return;
+            }
+            if !this.wants_playing.get_untracked() {
+                return;
+            }
+            if *this.flow_tick.lock().unwrap() != flow {
+                return;
+            }
+            this.schedule_retry();
+            this.arm_stall_watchdog();
+        });
+    }
+
+    fn disarm_stall_watchdog(&self) {
+        *self.stall_gen.lock().unwrap() += 1;
+    }
+
+    /// Immediately re-establish the current stream on a fresh connection.
+    /// Used when the OS reports connectivity back; no-op when idle.
+    pub fn reconnect(&self) {
+        if self.wants_playing.get_untracked() && self.current.get_untracked().is_some() {
+            self.cancel_retry();
+            self.schedule_retry();
+        }
     }
 
     /// Detach an element's handlers so its late events can no longer touch
@@ -74,6 +135,8 @@ impl Player {
         audio.set_onended(None);
         audio.set_onwaiting(None);
         audio.set_oncanplay(None);
+        audio.set_onprogress(None);
+        audio.set_onstalled(None);
         audio.set_onerror(None);
     }
 
@@ -94,6 +157,9 @@ impl Player {
 
     pub fn play(&self, station: Station) {
         self.cancel_retry();
+        // Fresh baseline; the watchdog arms below and cancels itself on flow.
+        self.note_flow();
+        self.arm_stall_watchdog();
 
         let Some(stream) = station_stream_url(&station) else {
             return;
@@ -154,6 +220,7 @@ impl Player {
                 this.is_playing.set(true);
             }
             this.loading.set(false);
+            this.note_flow();
         }) as Box<dyn Fn()>);
         audio.set_onplay(Some(on_play.as_ref().unchecked_ref()));
         on_play.forget();
@@ -178,6 +245,7 @@ impl Player {
         let this = self.clone();
         let on_waiting = Closure::wrap(Box::new(move || {
             this.loading.set(true);
+            this.arm_stall_watchdog();
         }) as Box<dyn Fn()>);
         audio.set_onwaiting(Some(on_waiting.as_ref().unchecked_ref()));
         on_waiting.forget();
@@ -185,9 +253,26 @@ impl Player {
         let this = self.clone();
         let on_canplay = Closure::wrap(Box::new(move || {
             this.loading.set(false);
+            this.note_flow();
         }) as Box<dyn Fn()>);
         audio.set_oncanplay(Some(on_canplay.as_ref().unchecked_ref()));
         on_canplay.forget();
+
+        let this = self.clone();
+        let on_progress = Closure::wrap(Box::new(move || {
+            this.note_flow();
+        }) as Box<dyn Fn()>);
+        audio.set_onprogress(Some(on_progress.as_ref().unchecked_ref()));
+        on_progress.forget();
+
+        let this = self.clone();
+        let on_stalled = Closure::wrap(Box::new(move || {
+            // Network stopped delivering (wifi-to-mobile handover classic):
+            // start/refresh the starvation watchdog.
+            this.arm_stall_watchdog();
+        }) as Box<dyn Fn()>);
+        audio.set_onstalled(Some(on_stalled.as_ref().unchecked_ref()));
+        on_stalled.forget();
 
         let this = self.clone();
         let on_error = Closure::wrap(Box::new(move || {
@@ -243,6 +328,7 @@ impl Player {
                 this.schedule_retry();
             } else {
                 this.is_playing.set(true);
+                this.note_flow();
                 *this.retry_attempt.lock().unwrap() = 0;
             }
         });
@@ -250,6 +336,7 @@ impl Player {
 
     pub fn pause(&self) {
         self.cancel_retry();
+        self.disarm_stall_watchdog();
         // Also stop a parked handoff element, otherwise it would keep
         // sounding with no remaining handle on it.
         self.teardown_previous();
@@ -269,6 +356,8 @@ impl Player {
         }
         self.wants_playing.set(true);
         self.cancel_retry();
+        // The element may be mid-starve: arm the watchdog (exits fast on flow).
+        self.arm_stall_watchdog();
         let this = self.clone();
         leptos::task::spawn_local(async move {
             let failed = match audio.play() {

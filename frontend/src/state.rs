@@ -320,6 +320,12 @@ impl AppState {
         self.step_queue(-1);
     }
 
+    /// Fresh connection on the current stream: used when the OS reports
+    /// connectivity back after an outage. No-op when idle.
+    pub fn reconnect(&self) {
+        self.player.reconnect();
+    }
+
     /// Whether a previous / next step has anywhere to go (2+ stations in the
     /// effective list). Uses tracked reads so views re-render on change.
     pub fn has_prev_next(&self) -> bool {

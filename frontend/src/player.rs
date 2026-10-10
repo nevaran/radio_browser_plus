@@ -396,17 +396,4 @@ impl Player {
             });
         }
     }
-
-    /// Icon for the mute button, same thresholds as before.
-    pub fn volume_icon(muted: bool, volume: f64) -> &'static str {
-        if muted {
-            "🔇"
-        } else if volume <= 0.0 {
-            "🔈"
-        } else if volume < 0.5 {
-            "🔉"
-        } else {
-            "🔊"
-        }
-    }
 }

@@ -44,6 +44,122 @@ pub fn format_bitrate(bitrate: Option<u32>) -> String {
     }
 }
 
+/// Display order applied on top of whatever the API returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    /// Keep the order the API returned (A–Z for most views, by clicks for
+    /// Popular).
+    Featured,
+    Name,
+    Popularity,
+    Bitrate,
+}
+
+impl SortMode {
+    pub const ALL: [SortMode; 4] = [
+        SortMode::Featured,
+        SortMode::Name,
+        SortMode::Popularity,
+        SortMode::Bitrate,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            SortMode::Featured => "featured",
+            SortMode::Name => "name",
+            SortMode::Popularity => "popularity",
+            SortMode::Bitrate => "bitrate",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Featured => "Featured",
+            SortMode::Name => "Name A–Z",
+            SortMode::Popularity => "Most played",
+            SortMode::Bitrate => "Bitrate",
+        }
+    }
+
+    pub fn from_key(key: &str) -> SortMode {
+        SortMode::ALL
+            .into_iter()
+            .find(|mode| mode.key() == key)
+            .unwrap_or(SortMode::Featured)
+    }
+}
+
+/// Sort a station list in place. `Featured` is a no-op so the API order (or
+/// the already-applied name sort) is preserved. All sorts are stable, so
+/// ties keep the previous order.
+pub fn sort_stations(stations: &mut [Station], mode: SortMode) {
+    match mode {
+        SortMode::Featured => {}
+        SortMode::Name => sort_by_name_asc(stations, station_sort_key),
+        SortMode::Popularity => stations
+            .sort_by_key(|s| std::cmp::Reverse(s.clickcount.unwrap_or(0))),
+        SortMode::Bitrate => {
+            stations.sort_by_key(|s| std::cmp::Reverse(s.bitrate.unwrap_or(0)))
+        }
+    }
+}
+
+/// Header title for a view, computed up-front so the toolbar tracks the
+/// requested view the moment the user navigates instead of when the fetch
+/// lands. Mirrors the titles set by the view loaders.
+pub fn title_for_view(view: &str, filter: Option<&str>, query: &str) -> String {
+    if view == "search" {
+        let query = query.trim();
+        if query.is_empty() {
+            return "Popular".to_string();
+        }
+        return format!("Search: {query}");
+    }
+    if let Some(filter_value) = filter {
+        let title = match view {
+            "genres" => "Genres".to_string(),
+            v => {
+                let mut c = v.chars();
+                format!("{}{}", c.next().unwrap_or('?').to_uppercase(), c.as_str())
+            }
+        };
+        return format!("{title}: {filter_value}");
+    }
+    match view {
+        "all" => "All stations",
+        "countries" => "Countries",
+        "languages" => "Languages",
+        "tags" | "genres" => "Genres",
+        "favorites" => "Favorites",
+        _ => "Popular",
+    }
+    .to_string()
+}
+
+/// "1 station" / "128 stations" for toolbar subtitles and empty states.
+pub fn format_count(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// Two-letter ISO code for a station's flag badge, when known.
+pub fn station_flag_code(station: &Station) -> Option<String> {
+    let code = station
+        .countrycode
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| c.len() == 2 && c.chars().all(|c| c.is_ascii_alphabetic()))?;
+    Some(code.to_lowercase())
+}
+
+/// URL of the local flag icon for a station, if its country code is known.
+pub fn station_flag_url(station: &Station) -> Option<String> {
+    station_flag_code(station).map(|code| format!("/flags/{code}.svg"))
+}
+
 pub fn station_genre(station: &Station) -> String {
     if let Some(tags) = station
         .tags
@@ -273,5 +389,92 @@ mod tests {
         assert_eq!(format_bitrate(Some(128)), "128 kbps");
         assert_eq!(format_bitrate(None), "Stream");
         assert_eq!(format_bitrate(Some(0)), "Stream");
+    }
+
+    #[test]
+    fn titles_views_up_front() {
+        assert_eq!(title_for_view("all", None, ""), "All stations");
+        assert_eq!(title_for_view("popular", None, ""), "Popular");
+        assert_eq!(title_for_view("countries", None, ""), "Countries");
+        assert_eq!(title_for_view("languages", None, ""), "Languages");
+        assert_eq!(title_for_view("tags", None, ""), "Genres");
+        assert_eq!(title_for_view("genres", None, ""), "Genres");
+        assert_eq!(title_for_view("favorites", None, ""), "Favorites");
+        assert_eq!(title_for_view("bogus", None, ""), "Popular");
+        assert_eq!(
+            title_for_view("countries", Some("Germany"), ""),
+            "Countries: Germany"
+        );
+        assert_eq!(
+            title_for_view("genres", Some("Rock"), ""),
+            "Genres: Rock"
+        );
+        assert_eq!(title_for_view("search", None, "jazz"), "Search: jazz");
+        assert_eq!(title_for_view("search", None, "  "), "Popular");
+    }
+
+    #[test]
+    fn formats_counts() {
+        assert_eq!(format_count(1, "station"), "1 station");
+        assert_eq!(format_count(0, "station"), "0 stations");
+        assert_eq!(format_count(42, "item"), "42 items");
+    }
+
+    #[test]
+    fn sort_mode_roundtrips_keys() {
+        for mode in SortMode::ALL {
+            assert_eq!(SortMode::from_key(mode.key()), mode);
+        }
+        assert_eq!(SortMode::from_key("nope"), SortMode::Featured);
+    }
+
+    #[test]
+    fn sorts_by_bitrate_descending_and_keeps_featured() {
+        let mut stations = vec![
+            Station {
+                name: "b".into(),
+                bitrate: Some(128),
+                ..Station::default()
+            },
+            Station {
+                name: "a".into(),
+                bitrate: Some(320),
+                ..Station::default()
+            },
+            Station {
+                name: "c".into(),
+                bitrate: None,
+                ..Station::default()
+            },
+        ];
+        sort_stations(&mut stations, SortMode::Featured);
+        let featured: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(featured, ["b", "a", "c"]);
+
+        sort_stations(&mut stations, SortMode::Bitrate);
+        let by_bitrate: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(by_bitrate, ["a", "b", "c"]);
+
+        sort_stations(&mut stations, SortMode::Name);
+        let by_name: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(by_name, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn reads_station_flag_codes() {
+        let station = Station {
+            countrycode: Some("DE".into()),
+            ..Station::default()
+        };
+        assert_eq!(station_flag_url(&station).as_deref(), Some("/flags/de.svg"));
+
+        let no_code = Station::default();
+        assert_eq!(station_flag_url(&no_code), None);
+
+        let bogus = Station {
+            countrycode: Some("Germany".into()),
+            ..Station::default()
+        };
+        assert_eq!(station_flag_url(&bogus), None);
     }
 }

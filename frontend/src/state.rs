@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use gloo_storage::{LocalStorage, Storage};
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::api;
 use crate::models::{
@@ -15,11 +16,25 @@ use crate::models::{
     User,
 };
 use crate::player::Player;
-use crate::utils::{normalize_view_name, sort_by_name_asc, station_sort_key};
+use crate::utils::{
+    normalize_view_name, sort_by_name_asc, sort_stations, station_sort_key, title_for_view,
+    SortMode,
+};
 
 const VIEW_KEY: &str = "radio-browser-plus-last-view";
+const SORT_KEY: &str = "radio-browser-plus-sort";
 const SEARCH_DEBOUNCE_MS: u32 = 300;
 pub const STATION_REFRESH_MS: u32 = 21_600_000; // 6 hours, as before
+/// Automatic retries for a failed view load before the error is surfaced.
+/// Big catalog fetches occasionally stall or fail upstream; retrying keeps a
+/// flaky response from stranding the grid until the user hammers the tabs.
+const LOAD_RETRIES: u8 = 2;
+const RETRY_DELAY_MS: u32 = 2000;
+/// Grid rows mounted at once. The backend can return thousands of stations;
+/// rendering them all mounts thousands of cards, images and reactive scopes,
+/// which blows up tab memory and scroll performance. The grids render at
+/// most this many and grow it as the user scrolls (infinite scroll).
+pub const GRID_PAGE: usize = 60;
 
 /// Action confirmed through the in-app confirm dialog. An enum (rather than a
 /// stored closure) keeps the dialog signal `Send + Sync` for view closures.
@@ -57,6 +72,27 @@ pub struct AppState {
     pub collections: RwSignal<Vec<CollectionItem>>,
     pub collection_kind: RwSignal<String>,
     pub view_title: RwSignal<String>,
+    /// True while a view/search fetch is in flight (skeletons + toolbar
+    /// progress indicator).
+    pub loading: RwSignal<bool>,
+    /// Last view-load failure, if the current view failed and retries ran
+    /// out. The grids render it with a Retry action instead of failing
+    /// silently (failures used to be console-only, leaving a stale grid
+    /// under a stale title that looked like the tab switch never happened).
+    pub view_error: RwSignal<Option<String>>,
+    /// Display order applied on top of the fetched list; persisted locally.
+    pub sort: RwSignal<SortMode>,
+    /// Cap on mounted grid rows; grows via [`Self::show_more`], resets on
+    /// navigation (not on idle reloads, which keep the user's place).
+    pub grid_limit: RwSignal<usize>,
+    /// Bottom spacer height (px) reserving the not-yet-mounted rows, so the
+    /// scrollbar reflects the full list from the first page instead of
+    /// growing while scrolling. Recomputed by [`Self::update_spacer`].
+    pub spacer_px: RwSignal<usize>,
+    /// Scroll-bottom position (px) at which the next page mounts. Tracks the
+    /// end of the mounted rows rather than the scroll bottom, because the
+    /// spacer below them is empty space that must not trigger loads.
+    pub load_more_at: RwSignal<i32>,
     pub favorites: RwSignal<HashMap<String, Favorite>>,
     pub favorites_loaded: RwSignal<bool>,
     pub metadata_refreshed: RwSignal<HashSet<String>>,
@@ -84,6 +120,9 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let player = Player::new();
+        let sort = LocalStorage::get::<String>(SORT_KEY)
+            .map(|key| SortMode::from_key(&key))
+            .unwrap_or(SortMode::Featured);
         Self {
             view: RwSignal::new("all".to_string()),
             filter: RwSignal::new(None),
@@ -93,6 +132,12 @@ impl AppState {
             collections: RwSignal::new(Vec::new()),
             collection_kind: RwSignal::new(String::new()),
             view_title: RwSignal::new("All stations".to_string()),
+            loading: RwSignal::new(false),
+            view_error: RwSignal::new(None),
+            sort: RwSignal::new(sort),
+            grid_limit: RwSignal::new(GRID_PAGE),
+            spacer_px: RwSignal::new(0),
+            load_more_at: RwSignal::new(i32::MAX),
             favorites: RwSignal::new(HashMap::new()),
             favorites_loaded: RwSignal::new(false),
             metadata_refreshed: RwSignal::new(HashSet::new()),
@@ -133,12 +178,16 @@ impl AppState {
         self.stations.set(Vec::new());
         self.queue.set(Vec::new());
         self.collections.set(Vec::new());
+        self.loading.set(false);
+        self.view_error.set(None);
         // Guest mode degrades to anonymous browsing instead of forcing sign-in.
         self.login_open.set(!self.allow_guest.get_untracked());
     }
 
     /// Route API failures: an auth rejection locks the UI, anything else is
-    /// only logged (the backend already clamps/validates inputs).
+    /// only logged (the backend already clamps/validates inputs). Used for
+    /// background work; view loads go through [`Self::note_view_error`] so
+    /// failures surface in the UI with a Retry action.
     fn api_failed(&self, error: String) {
         if error == "unauthorized" {
             self.handle_unauthorized();
@@ -407,7 +456,151 @@ impl AppState {
         let _ = LocalStorage::set(VIEW_KEY, view);
     }
 
+    /// Change the display sort mode and remember it across sessions.
+    pub fn set_sort(&self, mode: SortMode) {
+        self.sort.set(mode);
+        let _ = LocalStorage::set(SORT_KEY, mode.key());
+    }
+
+    /// Fetched stations with the user's sort mode applied, for display.
+    pub fn display_stations(&self) -> Vec<Station> {
+        let mut stations = self.stations.get();
+        sort_stations(&mut stations, self.sort.get());
+        stations
+    }
+
+    /// Rows the active grid displays: collections for the entry views
+    /// (Countries / Languages / Genres), stations for everything else.
+    fn grid_total(&self) -> usize {
+        let collection = matches!(
+            self.view.get_untracked().as_str(),
+            "countries" | "languages" | "tags" | "genres"
+        ) && self.filter.get_untracked().is_none();
+        if collection {
+            self.collections.get_untracked().len()
+        } else {
+            self.stations.get_untracked().len()
+        }
+    }
+
+    /// Render the next grid page, if any rows are still hidden. A no-op once
+    /// everything is visible, so scroll handlers can call it on every scroll
+    /// event without churning signals or re-rendering the grid.
+    pub fn show_more(&self) {
+        let total = self.grid_total();
+        let limit = self.grid_limit.get_untracked();
+        if limit < total {
+            self.grid_limit.set((limit + GRID_PAGE).min(total));
+        }
+    }
+
+    /// Recompute the bottom spacer and the load threshold after renders that
+    /// change the window, the totals, or the viewport geometry. Only mounted
+    /// rows load images and cost layout; the spacer below them is empty
+    /// reserved height, so off-screen content stays unloaded while the
+    /// scrollbar is stable from the first paint.
+    ///
+    /// Safe to call from render effects: both signals are change-guarded,
+    /// and the catch-up chain below strictly grows `grid_limit` toward
+    /// `total`, so it always terminates.
+    pub(crate) fn update_spacer(&self) {
+        let total = self.grid_total();
+        let shown = self.grid_limit.get_untracked().min(total);
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let Some(grid) = document.get_element_by_id("station-grid") else {
+            return;
+        };
+        if shown >= total {
+            if self.spacer_px.get_untracked() != 0 {
+                self.spacer_px.set(0);
+            }
+            if self.load_more_at.get_untracked() != i32::MAX {
+                self.load_more_at.set(i32::MAX);
+            }
+            return;
+        }
+        // Geometry from the mounted rows: column count from the grid width
+        // and the first card, row height from the tallest sampled card (an
+        // overestimate only shrinks the track once, at the very end).
+        let gap = element_gap_px(&grid);
+        let grid_w = grid.client_width() as f64;
+        let cards = grid
+            .query_selector_all(".station-card, .collection-card")
+            .ok();
+        let mut card_w = 0.0f64;
+        let mut card_h = 0.0f64;
+        if let Some(list) = cards {
+            for i in 0..list.length().min(12) {
+                if let Some(node) = list.item(i) {
+                    if let Ok(card) = node.dyn_into::<web_sys::HtmlElement>() {
+                        card_w = card_w.max(card.offset_width() as f64);
+                        card_h = card_h.max(card.offset_height() as f64);
+                    }
+                }
+            }
+        }
+        if card_w <= 0.0 || card_h <= 0.0 || grid_w <= 0.0 {
+            return; // Nothing measurable yet; keep the previous reservation.
+        }
+        let cols = ((grid_w + gap) / (card_w + gap)).round().max(1.0) as usize;
+        let row_h = card_h + gap;
+        let rows_remaining = total.saturating_sub(shown).div_ceil(cols);
+        let spacer = (rows_remaining as f64 * row_h) as usize;
+        // Exact end of the mounted rows: the footer sits directly below
+        // them, so its far edge in grid coordinates is the load threshold.
+        // (Derived from the footer — never from the scroll height, which
+        // already contains the previous spacer and would feed back into
+        // runaway growth.) `.station-grid` is positioned so the grid is the
+        // footer's offset parent and the coordinates match the scroll ones.
+        let threshold = grid
+            .query_selector(".grid-footer")
+            .ok()
+            .flatten()
+            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+            .map(|footer| footer.offset_top() + footer.offset_height())
+            .unwrap_or(i32::MAX);
+        if self.spacer_px.get_untracked() != spacer {
+            self.spacer_px.set(spacer);
+        }
+        if self.load_more_at.get_untracked() != threshold {
+            self.load_more_at.set(threshold);
+        }
+        // Dragging the scrollbar deep into the spacer must fill the window
+        // instead of parking on empty space: keep growing while the viewport
+        // is already past the mounted rows. Each step re-renders and returns
+        // here, so a long jump streams pages in over a few frames.
+        if grid.scroll_top() + grid.client_height() + 1600 >= threshold {
+            self.show_more();
+        }
+    }
+
+    /// Reset the grid window for a new result set: remount from the first
+    /// page and scroll back to the top. The scroll container survives view
+    /// switches, so without the scroll reset a new view would open mid-list
+    /// (and the infinite-scroll handler would immediately regrow the
+    /// window). Only navigation calls this — background reloads keep the
+    /// user's scroll position.
+    fn reset_grid_window(&self) {
+        // Idempotent: navigation entry points overlap (navigate + the
+        // hashchange it triggers) and search runs per keystroke, so never
+        // write signals or touch the DOM when already at the first page.
+        if self.grid_limit.get_untracked() != GRID_PAGE {
+            self.grid_limit.set(GRID_PAGE);
+        }
+        if let Some(grid) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("station-grid"))
+        {
+            if grid.scroll_top() != 0 {
+                grid.set_scroll_top(0);
+            }
+        }
+    }
+
     pub fn navigate(&self, view: &str, filter: Option<String>) {
+        self.reset_grid_window();
         let view = normalize_view_name(view);
         let mut hash = format!("#{view}");
         if let Some(f) = &filter {
@@ -431,6 +624,7 @@ impl AppState {
     }
 
     pub fn apply_hash(&self) {
+        self.reset_grid_window();
         let hash = web_sys::window()
             .and_then(|w| w.location().hash().ok())
             .unwrap_or_default();
@@ -469,16 +663,72 @@ impl AppState {
         if !self.is_logged_in() && !self.allow_guest.get_untracked() {
             self.stations.set(Vec::new());
             self.collections.set(Vec::new());
+            self.loading.set(false);
+            self.view_error.set(None);
             self.login_open.set(true);
             return;
         }
+        self.start_view_load(LOAD_RETRIES);
+    }
+
+    /// (Re)load the current view with up to `retries` automatic retries on
+    /// failure. The title and error slot reset up-front: the header tracks
+    /// the requested view instantly, and a previous failure never lingers
+    /// under a new attempt.
+    fn start_view_load(&self, retries: u8) {
+        let view = self.view.get_untracked();
+        let filter = self.filter.get_untracked();
+        let query = self.search_query.get_untracked();
+        self.view_title
+            .set(title_for_view(&view, filter.as_deref(), &query));
+        self.view_error.set(None);
+        self.loading.set(true);
         self.view_gen.update(|g| *g += 1);
         let gen = self.view_gen.get_untracked();
         let this = self.clone();
         leptos::task::spawn_local(async move {
             this.load_view_inner().await;
-            let _ = gen;
+            // Only the newest load clears the spinner; a superseded one
+            // leaves it to its successor.
+            if this.current_gen(gen) {
+                this.loading.set(false);
+                // A failed attempt used to strand the grid with nothing but
+                // a console message: retry while the user is still on this
+                // view (a newer navigation abandons the retry below), else
+                // the error slot stays set and the grids offer a Retry.
+                if this.view_error.get_untracked().is_some() && retries > 0 {
+                    let retry = this.clone();
+                    leptos::task::spawn_local(async move {
+                        TimeoutFuture::new(RETRY_DELAY_MS).await;
+                        if retry.current_gen(gen) {
+                            retry.start_view_load(retries - 1);
+                        }
+                    });
+                }
+            }
         });
+    }
+
+    /// Record a view-load failure for the UI (grid error block / banner).
+    /// Auth rejections always lock the UI; anything else is retryable, but
+    /// only the current attempt owns the error slot — a superseded attempt
+    /// must not paint errors over its successor's grid (`current` is the
+    /// generation check of the attempt that failed).
+    fn note_view_error(&self, error: String, current: bool) {
+        if error == "unauthorized" {
+            self.handle_unauthorized();
+            return;
+        }
+        web_sys::console::error_1(&error.clone().into());
+        if current {
+            self.view_error.set(Some(friendly_load_error(&error)));
+        }
+    }
+
+    /// Dismiss the load-error banner; the stale rows stay until the next
+    /// load replaces them.
+    pub fn dismiss_error(&self) {
+        self.view_error.set(None);
     }
 
     fn current_gen(&self, gen: u64) -> bool {
@@ -507,7 +757,7 @@ impl AppState {
                         self.view_title.set(format!("Search: {query}"));
                     }
                 }
-                Err(e) => self.api_failed(e),
+                Err(e) => self.note_view_error(e, self.current_gen(gen)),
             }
             return;
         }
@@ -539,7 +789,7 @@ impl AppState {
                         self.view_title.set(format!("{title}: {filter_value}"));
                     }
                 }
-                Err(e) => self.api_failed(e),
+                Err(e) => self.note_view_error(e, self.current_gen(gen)),
             }
             return;
         }
@@ -623,7 +873,7 @@ impl AppState {
                     self.view_title.set(title.to_string());
                 }
             }
-            Err(e) => self.api_failed(e),
+            Err(e) => self.note_view_error(e, self.current_gen(gen)),
         }
     }
 
@@ -648,13 +898,18 @@ impl AppState {
                     self.view_title.set(title.to_string());
                 }
             }
-            Err(e) => self.api_failed(e),
+            Err(e) => self.note_view_error(e, self.current_gen(gen)),
         }
     }
 
     // -- search ------------------------------------------------------------
 
     pub fn apply_search(&self, query: String) {
+        self.reset_grid_window();
+        // A new keystroke is a new attempt: drop any previous search error.
+        if self.view_error.get_untracked().is_some() {
+            self.view_error.set(None);
+        }
         let trimmed = query.trim().to_string();
         self.search_query.set(trimmed.clone());
         if trimmed.is_empty() {
@@ -664,6 +919,12 @@ impl AppState {
             return;
         }
         self.view.set("search".to_string());
+        self.view_title
+            .set(title_for_view("search", None, &trimmed));
+        self.loading.set(true);
+        // Abandon any in-flight view load: the debounced search below owns
+        // the spinner and the error slot from here on.
+        self.view_gen.update(|g| *g += 1);
         self.search_gen.update(|g| *g += 1);
         let gen = self.search_gen.get_untracked();
         let this = self.clone();
@@ -680,10 +941,50 @@ impl AppState {
                         this.stations.set(stations);
                         this.view_title.set(format!("Search: {trimmed}"));
                     }
+                    if this.search_gen.get_untracked() == gen {
+                        this.loading.set(false);
+                    }
                 }
-                Err(e) => this.api_failed(e),
+                Err(e) => {
+                    if this.search_gen.get_untracked() == gen {
+                        this.loading.set(false);
+                        this.note_view_error(e, true);
+                    } else {
+                        // A superseded keystroke owns nothing, except auth
+                        // loss which must always lock the UI.
+                        this.api_failed(e);
+                    }
+                }
             }
         });
+    }
+}
+
+/// Computed `gap` of the station grid in px (falls back to the desktop
+/// token when unreadable).
+fn element_gap_px(el: &web_sys::Element) -> f64 {
+    web_sys::window()
+        .and_then(|w| w.get_computed_style(el).ok().flatten())
+        .and_then(|s| s.get_property_value("gap").ok())
+        .and_then(|v| {
+            v.split_whitespace()
+                .next()
+                .and_then(|t| t.trim_end_matches("px").parse::<f64>().ok())
+        })
+        .unwrap_or(16.0)
+}
+
+/// Human-readable load failure for the error banner / error block. Raw API
+/// errors ("Request failed: 408") mean nothing to most users.
+fn friendly_load_error(error: &str) -> String {
+    if error.contains("408") {
+        "The radio catalog took too long to respond.".to_string()
+    } else if error.starts_with("Request failed") {
+        "Couldn't reach the radio catalog. Check your connection.".to_string()
+    } else if error.starts_with("Bad response") {
+        "The radio catalog returned an unexpected response.".to_string()
+    } else {
+        error.to_string()
     }
 }
 

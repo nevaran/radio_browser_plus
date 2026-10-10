@@ -3,12 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#070a12" />
+    <meta name="color-scheme" content="dark" />
     <title>Radio Browser Plus</title>
     <!-- Favicon, CSS, flags and the WASM bundle are injected/copied by Trunk -->
     <link data-trunk rel="icon" href="assets/favicon.ico" />
     <link data-trunk rel="css" href="assets/style.css" />
     <link data-trunk rel="copy-dir" href="assets/flags" data-target-path="flags" />
     <link data-trunk rel="rust" data-wasm-opt="z" data-weak-refs />
+    <style>
+      /* Matches the app background so the first paint is never a white flash. */
+      html { background: #070a12; }
+    </style>
   </head>
   <body></body>
 </html>

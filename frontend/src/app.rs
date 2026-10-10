@@ -9,6 +9,7 @@ use crate::components::{
     StationGrid,
 };
 use crate::state::{AppState, STATION_REFRESH_MS};
+use crate::utils::{format_count, SortMode};
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -18,31 +19,162 @@ pub fn App() -> impl IntoView {
 
     let title = state.clone();
     let menu = state.clone();
+    let sub = state.clone();
+    let sort_state = state.clone();
+    let sort_store = StoredValue::new(state.clone());
+    let scroller = state.clone();
+    let err_show = state.clone();
+    let err_text = state.clone();
+    let err_retry = StoredValue::new(state.clone());
+    let err_dismiss = StoredValue::new(state.clone());
     let grid_view = state.view;
     let grid_filter = state.filter;
+    let loading = state.loading;
+
+    // Collection views (Countries / Languages / Genres) list entries, not
+    // stations, so the station sort control hides while they are visible.
+    let is_collection = move || {
+        matches!(
+            grid_view.get().as_str(),
+            "countries" | "languages" | "tags" | "genres"
+        ) && grid_filter.get().is_none()
+    };
+
+    let subtitle = move || {
+        // Collection views browse entries (countries, languages, genres);
+        // every other view lists stations. Only count what is on screen.
+        let browsing_entries = matches!(
+            sub.view.get().as_str(),
+            "countries" | "languages" | "tags" | "genres"
+        ) && sub.filter.get().is_none();
+        if browsing_entries {
+            let entries = sub.collections.get().len();
+            if entries > 0 {
+                return format_count(entries, "item");
+            }
+        } else {
+            let stations = sub.stations.get().len();
+            if stations > 0 {
+                return format_count(stations, "station");
+            }
+        }
+        if sub.loading.get() {
+            return "Tuning in…".to_string();
+        }
+        match sub.view.get().as_str() {
+            "favorites" => "Star a station to keep it here".to_string(),
+            "search" => "No stations matched that search".to_string(),
+            "countries" | "languages" | "genres" => "Nothing to browse right now".to_string(),
+            _ => "No stations to show right now".to_string(),
+        }
+    };
 
     view! {
         <div class="app-shell">
             <Sidebar />
             <main class="content">
-                <div class="toolbar">
+                <header class="toolbar">
                     <button
                         id="menu-toggle"
                         class="menu-toggle"
                         aria-label="Toggle menu"
                         on:click=move |_| menu.sidebar_open.update(|open| *open = !*open)
                     >
-                        "☰"
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M4 7h16M4 12h16M4 17h16" />
+                        </svg>
                     </button>
-                    <h2 id="view-title">{move || title.view_title.get()}</h2>
-                </div>
-                <div id="station-grid" class="station-grid">
+                    <div class="toolbar-titles">
+                        <h2 id="view-title">{move || title.view_title.get()}</h2>
+                        <p class="toolbar-sub">{subtitle}</p>
+                    </div>
+                    <div class="toolbar-actions">
+                        <Show when=move || !is_collection()>
+                            <label class="sort-control">
+                                <span class="sort-label">"Sort"</span>
+                                <select
+                                    class="sort-select"
+                                    aria-label="Sort stations"
+                                    prop:value=move || sort_state.sort.get().key()
+                                    on:change=move |ev| {
+                                        let mode = SortMode::from_key(&event_target_value(&ev));
+                                        sort_store.with_value(|s| s.set_sort(mode));
+                                    }
+                                >
+                                    {SortMode::ALL
+                                        .into_iter()
+                                        .map(|mode| {
+                                            view! { <option value=mode.key()>{mode.label()}</option> }
+                                        })
+                                        .collect_view()}
+                                </select>
+                            </label>
+                        </Show>
+                    </div>
+                    <div
+                        class="toolbar-progress"
+                        class:active=move || loading.get()
+                        aria-hidden="true"
+                    ></div>
+                </header>
+                // Load-failure banner: visible only while stale rows are on
+                // screen (an empty grid renders the error block instead), so
+                // a failed tab switch explains itself and offers a Retry
+                // instead of silently re-showing the previous view.
+                <Show when=move || {
+                    err_show.view_error.get().is_some()
+                        && !err_show.loading.get()
+                        && (!err_show.stations.get().is_empty()
+                            || !err_show.collections.get().is_empty())
+                }>
+                    <div class="view-error" role="alert">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M12 4 3 20h18L12 4Z" />
+                            <path d="M12 10v4.5m0 3v.5" />
+                        </svg>
+                        <span class="view-error-text">
+                            {move || err_text.view_error.get().unwrap_or_default()}
+                        </span>
+                        <button
+                            type="button"
+                            class="view-error-retry"
+                            on:click=move |_| err_retry.with_value(|s| s.load_view())
+                        >
+                            "Retry"
+                        </button>
+                        <button
+                            type="button"
+                            class="view-error-dismiss"
+                            aria-label="Dismiss error"
+                            on:click=move |_| err_dismiss.with_value(|s| s.dismiss_error())
+                        >
+                            "×"
+                        </button>
+                    </div>
+                </Show>
+                // Infinite scroll: the grids mount a window of rows with a
+                // spacer reserving the full height, so grow the window as
+                // the viewport nears the end of the *mounted* rows
+                // (`load_more_at`, recomputed after every render). The
+                // check is layout-free and `show_more` is a no-op once
+                // every row is visible, so this stays quiet on scroll.
+                <div
+                    id="station-grid"
+                    class="station-grid"
+                    on:scroll=move |ev| {
+                        let Some(target) = ev.target() else { return };
+                        let Ok(el) = target.dyn_into::<web_sys::HtmlElement>() else {
+                            return
+                        };
+                        if el.scroll_top() + el.client_height() + 1600
+                            >= scroller.load_more_at.get_untracked()
+                        {
+                            scroller.show_more();
+                        }
+                    }
+                >
                     {move || {
-                        let collection = matches!(
-                            grid_view.get().as_str(),
-                            "countries" | "languages" | "tags" | "genres"
-                        ) && grid_filter.get().is_none();
-                        if collection {
+                        if is_collection() {
                             view! { <CollectionGrid /> }.into_any()
                         } else {
                             view! { <StationGrid /> }.into_any()
@@ -167,6 +299,17 @@ fn init_app(state: AppState) {
                     }
                 }
             }
+            // "/" jumps to search (opening the mobile drawer first so the
+            // field is actually reachable); Escape closes the drawer.
+            if ev.key() == "/" {
+                ev.prevent_default();
+                focus_search_field(&state);
+                return;
+            }
+            if ev.key() == "Escape" {
+                state.sidebar_open.set(false);
+                return;
+            }
             // Media keys on keyboards that surface as key events (most OS
             // media keys arrive via the Media Session handlers below instead).
             let code = ev.code();
@@ -268,6 +411,35 @@ fn init_app(state: AppState) {
                 window.add_event_listener_with_callback("online", on_online.as_ref().unchecked_ref());
         }
         on_online.forget();
+    }
+}
+
+/// Focus the sidebar search box, pulling the mobile drawer open first so the
+/// field is on screen. Bound to the `/` shortcut.
+fn focus_search_field(state: &AppState) {
+    let narrow = web_sys::window()
+        .map(|w| w.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(f64::MAX) <= 768.0)
+        .unwrap_or(false);
+    if narrow {
+        state.sidebar_open.set(true);
+    }
+    let focus = || {
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("search"))
+        {
+            let _ = el.unchecked_into::<web_sys::HtmlElement>().focus();
+        }
+    };
+    // Wait a frame on mobile so the drawer is mounted/visible before focus.
+    if narrow {
+        let closure = Closure::once(focus);
+        if let Some(window) = web_sys::window() {
+            let _ = window.request_animation_frame(closure.as_ref().unchecked_ref());
+        }
+        closure.forget();
+    } else {
+        focus();
     }
 }
 

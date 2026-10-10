@@ -18,7 +18,12 @@ single-page app (client-side rendering) that talks to that API.
   - **Languages**: Filter by language using certain tags
   - **Genre**: Discover stations using certain tags
 - Search functionality to find specific radio stations
+- Sort station lists by name, most played, or bitrate (remembered per browser)
+- Loading skeletons and empty states for every view
+- Station grids render incrementally (infinite scroll + Load more) with a stable full-list scrollbar, so catalogs with thousands of entries stay fast
+- Failed view loads retry automatically and surface a Retry action instead of failing silently
 - Stream audio through any device that supports a web browser
+- Keyboard shortcuts: `/` focus search, `Space` play/stop, `M` mute, arrows volume
 - User authentication and per-user favorites
 - Persistent favorites stored in the local `data/` directory
 
@@ -140,7 +145,7 @@ Notes on the migration from the previous JavaScript UI (`public/app.js`,
 - Same views (All, Popular, Favorites, Countries, Languages, Genres), search
   with debounce, `#view/filter` hash deep links, auth dialogs, favorites with
   live metadata refresh, now-playing bar with stream-health indicator, volume /
-  mute with persistence, and keyboard shortcuts (`M`, `Space`, arrows).
+  mute with persistence, and keyboard shortcuts (`/`, `M`, `Space`, arrows).
 - Performance: fine-grained reactivity re-renders only changed nodes; sorting
   runs directly in WASM (the sort Web Worker was removed as obsolete); station
   artwork uses native lazy loading.

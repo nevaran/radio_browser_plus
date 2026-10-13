@@ -136,7 +136,7 @@ pub fn NowPlaying() -> impl IntoView {
                             />
                             <span
                                 class="art-eq"
-                                class:active=move || is_playing.get()
+                                class:active=move || is_playing.get() && !loading.get()
                                 aria-hidden="true"
                             >
                                 <i></i><i></i><i></i><i></i>

@@ -145,6 +145,28 @@ pub fn format_count(count: usize, noun: &str) -> String {
     }
 }
 
+/// Honest playback badge for a station card. The card must reflect the
+/// player — sounding, buffering, or paused — never just "was selected".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardPlayback {
+    Idle,
+    Loading,
+    Playing,
+    Paused,
+}
+
+pub fn card_playback(is_current: bool, is_playing: bool, loading: bool) -> CardPlayback {
+    if !is_current {
+        CardPlayback::Idle
+    } else if loading {
+        CardPlayback::Loading
+    } else if is_playing {
+        CardPlayback::Playing
+    } else {
+        CardPlayback::Paused
+    }
+}
+
 /// Two-letter ISO code for a station's flag badge, when known.
 pub fn station_flag_code(station: &Station) -> Option<String> {
     let code = station
@@ -458,6 +480,17 @@ mod tests {
         sort_stations(&mut stations, SortMode::Name);
         let by_name: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(by_name, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn card_playback_states_are_honest() {
+        use CardPlayback::*;
+        assert_eq!(card_playback(false, false, false), Idle);
+        assert_eq!(card_playback(false, true, false), Idle);
+        assert_eq!(card_playback(true, true, false), Playing);
+        assert_eq!(card_playback(true, true, true), Loading);
+        assert_eq!(card_playback(true, false, true), Loading);
+        assert_eq!(card_playback(true, false, false), Paused);
     }
 
     #[test]

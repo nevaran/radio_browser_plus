@@ -7,7 +7,8 @@ use web_sys::HtmlImageElement;
 use crate::models::{station_id, Station};
 use crate::state::AppState;
 use crate::utils::{
-    primary_image, station_flag_url, station_genre, truncate_name, PLACEHOLDER_SVG,
+    card_playback, primary_image, station_flag_url, station_genre, truncate_name,
+    CardPlayback, PLACEHOLDER_SVG,
 };
 
 /// Stroke icon used by empty-state blocks.
@@ -134,6 +135,8 @@ fn StationCard(station: Station) -> impl IntoView {
     let user = state.user;
     let favorites = state.favorites;
     let current = state.player.current;
+    let is_playing = state.player.is_playing;
+    let loading = state.player.loading;
     let play_station = station.clone();
     let play_station_key = station.clone();
     let image_src = primary_image(&station);
@@ -149,11 +152,16 @@ fn StationCard(station: Station) -> impl IntoView {
         })
     };
 
+    // Playback badge follows the player, not the selection: only a station
+    // that is actually sounding (or audibly buffering) reads "Playing".
+    let status = move || card_playback(is_current(), is_playing.get(), loading.get());
+
     view! {
         <article
             class="station-card"
             class:favorite=move || fav_id.with_value(|fid| favorites.with(|m| m.contains_key(fid)))
-            class:playing=move || is_current()
+            class:current=move || !matches!(status(), CardPlayback::Idle)
+            class:playing=move || matches!(status(), CardPlayback::Playing)
             data-station=article_id
             role="button"
             tabindex="0"
@@ -188,20 +196,36 @@ fn StationCard(station: Station) -> impl IntoView {
                         }
                     }
                 />
-                <div class="card-overlay" aria-hidden="true">
-                    <span class="card-play">
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M8.5 5.8v12.4L18.8 12 8.5 5.8Z" />
-                        </svg>
-                    </span>
-                </div>
-                <Show when=move || is_current()>
-                    <span class="playing-pill">
-                        <span class="eq" aria-hidden="true">
-                            <i></i><i></i><i></i>
-                        </span>
-                        "Playing"
-                    </span>
+                <Show when=move || !matches!(status(), CardPlayback::Idle)>
+                    {move || match status() {
+                        CardPlayback::Loading => view! {
+                            <span class="playing-pill loading">
+                                <span class="eq" aria-hidden="true">
+                                    <i></i><i></i><i></i>
+                                </span>
+                                "Loading"
+                            </span>
+                        }
+                            .into_any(),
+                        CardPlayback::Playing => view! {
+                            <span class="playing-pill">
+                                <span class="eq" aria-hidden="true">
+                                    <i></i><i></i><i></i>
+                                </span>
+                                "Playing"
+                            </span>
+                        }
+                            .into_any(),
+                        _ => view! {
+                            <span class="playing-pill paused">
+                                <span class="eq" aria-hidden="true">
+                                    <i></i><i></i><i></i>
+                                </span>
+                                "Paused"
+                            </span>
+                        }
+                            .into_any(),
+                    }}
                 </Show>
                 <div class="card-badges">
                     {bitrate_badge.map(|b| view! { <span class="badge">{b}</span> })}

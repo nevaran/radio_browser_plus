@@ -1070,11 +1070,14 @@ a:focus-visible,
      raster and decoded-image memory for rows far outside the viewport. */
   content-visibility: auto;
   contain-intrinsic-size: auto 340px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025));
+  /* Flat tile: solid surface, artwork bleeding edge to edge, no inset
+     padding or layered gradients around the art. */
+  background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 0.6rem;
-  box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-md);
+  padding: 0;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
   transition: transform var(--dur-med) var(--ease-out),
     border-color var(--dur-med) ease, box-shadow var(--dur-med) ease,
     background var(--dur-med) ease;
@@ -1082,10 +1085,10 @@ a:focus-visible,
 
 .station-card:hover,
 .collection-card:hover {
-  transform: translateY(-4px);
-  border-color: rgba(251, 191, 36, 0.35);
-  box-shadow: var(--shadow-md), 0 14px 34px rgba(251, 191, 36, 0.1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  transform: translateY(-3px);
+  background: var(--surface-hover);
+  border-color: var(--border-bright);
+  box-shadow: var(--shadow-md);
 }
 
 .station-card:active,
@@ -1093,9 +1096,16 @@ a:focus-visible,
   transform: translateY(-1px) scale(0.995);
 }
 
+/* Current station that is not sounding (paused or still connecting):
+   identifiable, but without the "playing" glow. */
+.station-card.current {
+  border-color: var(--border-bright);
+}
+
 .station-card.playing {
-  border-color: rgba(251, 191, 36, 0.55);
-  box-shadow: var(--glow-accent-sm), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  border-color: var(--accent);
+  background: rgba(251, 191, 36, 0.05);
+  box-shadow: var(--shadow-md);
 }
 
 .card-art {
@@ -1106,18 +1116,11 @@ a:focus-visible,
   justify-content: center;
   align-items: center;
   overflow: hidden;
-  border-radius: 12px;
-  background:
-    radial-gradient(120% 100% at 30% 0%, rgba(255, 255, 255, 0.07), transparent 60%),
-    rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--hairline);
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.03);
+  border: none;
+  border-bottom: 1px solid var(--hairline);
   flex-shrink: 0;
-  transition: border-color var(--dur-med) ease;
-}
-
-.station-card:hover .card-art,
-.collection-card:hover .card-art {
-  border-color: rgba(251, 191, 36, 0.28);
 }
 
 .card-art img {
@@ -1134,11 +1137,11 @@ a:focus-visible,
 
 .collection-card .card-art img {
   object-fit: contain;
-  padding: 16%;
+  padding: 10%;
 }
 
 .collection-card.is-flag .card-art img {
-  padding: 14%;
+  padding: 8%;
   /* Plain border instead of drop-shadow: drop-shadow re-rasterizes the whole
      layer on every scroll frame, border does not. */
   border: 1px solid var(--border);
@@ -1253,6 +1256,25 @@ a:focus-visible,
   box-shadow: var(--glow-accent-sm);
 }
 
+/* Paused badge: muted, bars frozen. Loading badge: cool blue to match the
+   player spinner, bars still moving. */
+.playing-pill.paused {
+  border-color: var(--border-bright);
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.playing-pill.paused .eq i {
+  animation: none;
+  transform: scaleY(0.3);
+}
+
+.playing-pill.loading {
+  border-color: rgba(125, 211, 252, 0.5);
+  color: #bae6fd;
+  box-shadow: 0 2px 12px rgba(56, 189, 248, 0.25);
+}
+
 /* Tiny equalizer used in pills and overlays */
 .eq {
   display: inline-flex;
@@ -1322,7 +1344,7 @@ a:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 0.28rem;
-  padding: 0.65rem 0.3rem 0.2rem;
+  padding: 0.6rem 0.75rem 0.75rem;
   min-width: 0;
 }
 
@@ -1412,8 +1434,9 @@ a:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
-  padding: 0.6rem;
-  border-radius: var(--radius-lg);
+  padding: 0 0 0.7rem;
+  overflow: hidden;
+  border-radius: var(--radius-md);
   border: 1px solid var(--hairline);
   background: rgba(255, 255, 255, 0.025);
 }
@@ -1428,12 +1451,12 @@ a:focus-visible,
 
 .skeleton-art {
   aspect-ratio: 1;
-  border-radius: 12px;
+  border-radius: 0;
 }
 
 .skeleton-line {
   height: 0.7rem;
-  margin: 0 0.3rem;
+  margin: 0 0.75rem;
 }
 
 .skeleton-line.w-70 { width: 70%; }
@@ -2280,14 +2303,8 @@ a:focus-visible,
     gap: 0.6rem;
   }
 
-  .station-card,
-  .collection-card {
-    padding: 0.5rem;
-    border-radius: var(--radius-md);
-  }
-
   .card-body {
-    padding: 0.5rem 0.15rem 0.1rem;
+    padding: 0.5rem 0.6rem 0.6rem;
     gap: 0.2rem;
   }
 

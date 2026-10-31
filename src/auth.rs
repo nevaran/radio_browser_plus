@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
+    io::Write,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
 };
@@ -55,10 +56,59 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HeartbeatRequest {
+    pub station: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ActivePresence {
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub guest: bool,
+    #[serde(default)]
+    pub station: Option<String>,
+    #[serde(default)]
+    pub ip: String,
+    #[serde(default)]
+    pub active_seconds: u64,
+    #[serde(default)]
+    pub started_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AdminStatsResponse {
+    #[serde(default)]
+    pub stats_enabled: bool,
+    #[serde(default)]
+    pub guest_tracking_enabled: bool,
+    #[serde(default)]
+    pub active_users: Vec<ActivePresence>,
+    #[serde(default)]
+    pub guests: Vec<ActivePresence>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Session {
     username: String,
     expires_at: chrono::DateTime<Utc>,
+    started_at: chrono::DateTime<Utc>,
+    #[serde(default)]
+    last_seen: Option<chrono::DateTime<Utc>>,
+    ip: Option<String>,
+    user_agent: Option<String>,
+    current_station: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GuestSession {
+    id: String,
+    started_at: chrono::DateTime<Utc>,
+    last_seen: chrono::DateTime<Utc>,
+    ip: String,
+    user_agent: Option<String>,
+    current_station: Option<String>,
 }
 
 /// Username allowlist: normalized usernames must match this. It keeps
@@ -84,14 +134,19 @@ type LoginFailures = HashMap<String, (chrono::DateTime<Utc>, u32)>;
 /// Bound on tracked usernames so failure tracking itself cannot grow without
 /// limit (e.g. via username rotation).
 const MAX_TRACKED_FAILURES: usize = 10_000;
+const ACTIVE_PRESENCE_TIMEOUT_MINUTES: i64 = 3;
 
 #[derive(Debug, Default)]
 pub struct AuthService {
     root_dir: PathBuf,
     users_path: PathBuf,
     sessions_path: PathBuf,
+    activity_log_path: PathBuf,
+    stats_enabled: bool,
+    log_retention_days: u64,
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     users: Arc<RwLock<HashMap<String, User>>>,
+    guest_sessions: Arc<RwLock<HashMap<String, GuestSession>>>,
     login_failures: Arc<Mutex<LoginFailures>>,
 }
 
@@ -100,6 +155,7 @@ impl AuthService {
         let root_dir = root_dir.into();
         let users_path = root_dir.join("users.json");
         let sessions_path = root_dir.join("sessions.json");
+        let activity_log_path = root_dir.join("activity.log");
         let users = match fs::read_to_string(&users_path) {
             Ok(contents) => {
                 serde_json::from_str::<HashMap<String, User>>(&contents).unwrap_or_default()
@@ -112,19 +168,34 @@ impl AuthService {
             }
             Err(_) => HashMap::new(),
         };
+        let stats_enabled = std::env::var("ADMIN_STATS_ENABLED")
+            .ok()
+            .as_deref()
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        let log_retention_days = std::env::var("LOG_RETENTION_DAYS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0);
 
         if let Some(parent) = users_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
 
-        Self {
+        let auth = Self {
             root_dir,
             users_path,
             sessions_path,
+            activity_log_path,
+            stats_enabled,
+            log_retention_days,
             sessions: Arc::new(RwLock::new(sessions)),
             users: Arc::new(RwLock::new(users)),
+            guest_sessions: Arc::new(RwLock::new(HashMap::new())),
             login_failures: Arc::new(Mutex::new(HashMap::new())),
-        }
+        };
+        auth.initialize_activity_log();
+        auth
     }
 
     pub fn ensure_default_admin(&self, username: &str, password: &str) {
@@ -178,6 +249,165 @@ impl AuthService {
         Self::write_json_file(&self.sessions_path, &payload);
     }
 
+    fn activity_log_enabled(&self) -> bool {
+        self.log_retention_days > 0
+    }
+
+    fn initialize_activity_log(&self) {
+        if !self.activity_log_enabled() {
+            return;
+        }
+
+        match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.activity_log_path)
+        {
+            Ok(_) => self.prune_activity_log(),
+            Err(error) => tracing::error!(
+                path = %self.activity_log_path.display(),
+                error = %error,
+                "Failed to initialize activity log"
+            ),
+        }
+    }
+
+    fn prune_activity_log(&self) {
+        if !self.activity_log_enabled() {
+            return;
+        }
+
+        let cutoff = Utc::now() - chrono::Duration::days(self.log_retention_days as i64);
+        let Ok(contents) = fs::read_to_string(&self.activity_log_path) else {
+            return;
+        };
+
+        let filtered: Vec<String> = contents
+            .lines()
+            .filter_map(|line| {
+                if Self::activity_log_timestamp(line).is_some_and(|timestamp| timestamp >= cutoff) {
+                    Some(line.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let payload = if filtered.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", filtered.join("\n"))
+        };
+        if payload != contents {
+            if let Err(error) = fs::write(&self.activity_log_path, payload) {
+                tracing::warn!(
+                    path = %self.activity_log_path.display(),
+                    error = %error,
+                    "Failed to prune activity log"
+                );
+            }
+        }
+    }
+
+    fn activity_log_timestamp(line: &str) -> Option<chrono::DateTime<Utc>> {
+        if let Some(timestamp) = line
+            .strip_prefix('[')
+            .and_then(|line| line.split_once(']'))
+            .map(|(timestamp, _)| timestamp)
+        {
+            return chrono::DateTime::parse_from_rfc3339(timestamp)
+                .ok()
+                .map(|timestamp| timestamp.with_timezone(&Utc));
+        }
+
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        let timestamp = entry.get("ts")?.as_str()?;
+        chrono::DateTime::parse_from_rfc3339(timestamp)
+            .ok()
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+    }
+
+    fn log_activity(
+        &self,
+        event: &str,
+        username: Option<&str>,
+        ip: Option<&str>,
+        station: Option<&str>,
+        details: Option<serde_json::Value>,
+    ) {
+        if !self.activity_log_enabled() {
+            return;
+        }
+
+        let event_label = match event {
+            "session_start" => "Session started",
+            "session_end" => "Session ended",
+            "station_started" => "Station started",
+            "guest_session_start" => "Guest session started",
+            "user_created" => "User created",
+            "password_changed" => "Password changed",
+            _ => event,
+        };
+        let mut fields = vec![
+            format!(
+                "[{}]",
+                Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            ),
+            event_label.to_string(),
+        ];
+        if let Some(username) = username {
+            fields.push(format!("User: {}", sanitize_for_log(username)));
+        }
+        if let Some(ip) = ip {
+            fields.push(format!("IP: {}", sanitize_for_log(ip)));
+        }
+        if let Some(station) = station {
+            fields.push(format!("Station: {}", sanitize_for_log(station)));
+        }
+        if let Some(details) = details.and_then(|details| details.as_object().cloned()) {
+            for (key, value) in details {
+                if key == "session_id" || value.is_null() {
+                    continue;
+                }
+                let value = value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string());
+                fields.push(format!(
+                    "{}: {}",
+                    key.replace('_', " "),
+                    sanitize_for_log(&value)
+                ));
+            }
+        }
+        let entry = fields.join(" | ");
+
+        let mut file = match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.activity_log_path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::error!(
+                    path = %self.activity_log_path.display(),
+                    error = %error,
+                    "Failed to open activity log"
+                );
+                return;
+            }
+        };
+        if let Err(error) = writeln!(file, "{entry}") {
+            tracing::error!(
+                path = %self.activity_log_path.display(),
+                error = %error,
+                "Failed to write activity log entry"
+            );
+            return;
+        }
+        self.prune_activity_log();
+    }
+
     fn normalize_username(username: &str) -> String {
         username.trim().to_lowercase()
     }
@@ -185,6 +415,137 @@ impl AuthService {
     fn user_dir(&self, username: &str) -> PathBuf {
         let safe = Self::normalize_username(username);
         self.root_dir.join(format!("user-{safe}"))
+    }
+
+    fn real_ip(headers: &HeaderMap) -> String {
+        for name in [
+            "CF-Connecting-IP",
+            "True-Client-IP",
+            "X-Real-IP",
+            "X-Forwarded-For",
+        ] {
+            let Some(value) = headers.get(name) else {
+                continue;
+            };
+            let Ok(value) = value.to_str() else {
+                continue;
+            };
+            let candidate = value
+                .split(',')
+                .map(str::trim)
+                .find(|piece| !piece.is_empty())
+                .unwrap_or(value.trim());
+            if !candidate.is_empty() {
+                return candidate.to_string();
+            }
+        }
+        "unknown".to_string()
+    }
+
+    fn request_is_secure(headers: &HeaderMap) -> bool {
+        let forwarded_proto = headers
+            .get_all("x-forwarded-proto")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .any(|value| value.eq_ignore_ascii_case("https"));
+        if forwarded_proto {
+            return true;
+        }
+
+        headers
+            .get("x-forwarded-ssl")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("on"))
+            || headers
+                .get("forwarded")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.split(';').any(|pair| {
+                    pair.trim()
+                        .split('=')
+                        .map(str::trim)
+                        .collect::<Vec<_>>()
+                        .get(0)
+                        .is_some_and(|key| key.eq_ignore_ascii_case("proto"))
+                        && pair
+                            .split('=')
+                            .map(str::trim)
+                            .collect::<Vec<_>>()
+                            .get(1)
+                            .is_some_and(|value| value.eq_ignore_ascii_case("https"))
+                }))
+    }
+
+    fn session_cookie_name(headers: &HeaderMap) -> &'static str {
+        if Self::request_is_secure(headers) {
+            "__Host-session_id"
+        } else {
+            "session_id"
+        }
+    }
+
+    fn alternate_session_cookie_name(headers: &HeaderMap) -> &'static str {
+        if Self::request_is_secure(headers) {
+            "session_id"
+        } else {
+            "__Host-session_id"
+        }
+    }
+
+    fn guest_cookie_name(headers: &HeaderMap) -> &'static str {
+        if Self::request_is_secure(headers) {
+            "__Host-guest_session_id"
+        } else {
+            "guest_session_id"
+        }
+    }
+
+    fn extract_guest_session_id(headers: &HeaderMap) -> Option<String> {
+        let prefixes = [
+            format!("{}=", Self::guest_cookie_name(headers)),
+            "guest_session_id=".to_string(),
+            "__Host-guest_session_id=".to_string(),
+        ];
+        for value in headers.get_all("cookie") {
+            let Ok(cookie_value) = value.to_str() else {
+                continue;
+            };
+            for part in cookie_value.split(';') {
+                let part = part.trim();
+                for prefix in &prefixes {
+                    if let Some(session_id) = part.strip_prefix(prefix.as_str()) {
+                        if !session_id.is_empty() && session_id.len() <= 128 {
+                            return Some(session_id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn guest_cookie_header(session_id: &str, headers: &HeaderMap) -> HeaderValue {
+        let cookie_name = Self::guest_cookie_name(headers);
+        let secure = Self::request_is_secure(headers);
+        HeaderValue::from_str(&format!(
+            "{cookie_name}={session_id}; Path=/; HttpOnly;{} SameSite=Lax; Max-Age=86400; Expires={}",
+            if secure { " Secure;" } else { "" },
+            (Utc::now() + chrono::Duration::hours(24))
+                .format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string()
+        ))
+        .expect("valid guest cookie")
+    }
+
+    fn clear_guest_cookie_header(headers: &HeaderMap) -> HeaderValue {
+        let cookie_name = Self::guest_cookie_name(headers);
+        let secure = Self::request_is_secure(headers);
+        HeaderValue::from_str(&format!(
+            "{cookie_name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly;{} SameSite=Lax",
+            if secure { " Secure;" } else { "" }
+        ))
+        .expect("valid guest logout cookie")
     }
 
     /// Create a directory with owner-only access when possible, so per-user
@@ -249,6 +610,15 @@ impl AuthService {
     }
 
     pub fn login(&self, username: &str, password: &str) -> Result<(User, String), String> {
+        self.login_with_context(username, password, &HeaderMap::new())
+    }
+
+    pub fn login_with_context(
+        &self,
+        username: &str,
+        password: &str,
+        headers: &HeaderMap,
+    ) -> Result<(User, String), String> {
         let normalized = Self::normalize_username(username);
         let now = Utc::now();
         {
@@ -288,14 +658,27 @@ impl AuthService {
         self.login_failures.lock().unwrap().remove(&normalized);
         let session_id = uuid::Uuid::new_v4().to_string();
         let mut sessions = self.sessions.write().unwrap();
+        let ip = Self::real_ip(headers);
         sessions.insert(
             session_id.clone(),
             Session {
                 username: normalized.clone(),
                 expires_at: now + chrono::Duration::days(365),
+                started_at: now,
+                last_seen: Some(now),
+                ip: Some(ip.clone()),
+                user_agent: None,
+                current_station: None,
             },
         );
         self.write_sessions(&sessions);
+        self.log_activity(
+            "session_start",
+            Some(&normalized),
+            Some(&ip),
+            None,
+            None,
+        );
         tracing::info!(username = %sanitize_for_log(&normalized), "User logged in");
         Ok((user, session_id))
     }
@@ -319,16 +702,35 @@ impl AuthService {
     pub fn current_user_from_session(&self, session_id: &str) -> Option<User> {
         let now = Utc::now();
         let mut sessions = self.sessions.write().unwrap();
-        let session = sessions.get(session_id)?.clone();
+        let Some(session) = sessions.get(session_id).cloned() else {
+            return None;
+        };
         if session.expires_at <= now {
             sessions.remove(session_id);
             self.write_sessions(&sessions);
+            self.log_activity(
+                "session_end",
+                Some(&session.username),
+                session.ip.as_deref(),
+                session.current_station.as_deref(),
+                Some(serde_json::json!({ "duration_seconds": (now - session.started_at).num_seconds().max(0) })),
+            );
             return None;
         }
-        if session.expires_at < now + chrono::Duration::days(365) {
-            if let Some(active_session) = sessions.get_mut(session_id) {
+        let mut changed = false;
+        if let Some(active_session) = sessions.get_mut(session_id) {
+            if active_session.expires_at < now + chrono::Duration::days(365) {
                 active_session.expires_at = now + chrono::Duration::days(365);
+                changed = true;
             }
+            if active_session.last_seen.map_or(true, |last_seen| {
+                last_seen + chrono::Duration::seconds(30) <= now
+            }) {
+                active_session.last_seen = Some(now);
+                changed = true;
+            }
+        }
+        if changed {
             self.write_sessions(&sessions);
         }
         let username = session.username;
@@ -354,6 +756,16 @@ impl AuthService {
         };
 
         let user = self.create_user_internal(username, password, user_role, false)?;
+        self.log_activity(
+            "user_created",
+            Some(&user.username),
+            None,
+            None,
+            Some(serde_json::json!({
+                "actor": actor.username,
+                "role": user.role.as_str(),
+            })),
+        );
         tracing::info!(
             username = %sanitize_for_log(&user.username),
             role = user.role.as_str(),
@@ -396,6 +808,13 @@ impl AuthService {
             hash(trimmed_new, DEFAULT_COST).map_err(|_| "Failed to hash password".to_string())?;
         user.password_hash = new_hash;
         self.write_users(&users);
+        self.log_activity(
+            "password_changed",
+            Some(&normalized),
+            None,
+            None,
+            Some(serde_json::json!({ "sessions_revoked": true })),
+        );
         tracing::info!(
             username = %sanitize_for_log(&normalized),
             "Password changed; sessions revoked"
@@ -423,74 +842,266 @@ impl AuthService {
 
     pub fn logout(&self, session_id: &str) {
         let mut sessions = self.sessions.write().unwrap();
-        let username = sessions.remove(session_id).map(|s| s.username);
+        let Some(session) = sessions.remove(session_id) else {
+            tracing::debug!("Logout with unknown session");
+            return;
+        };
         self.write_sessions(&sessions);
-        match username {
-            Some(username) => {
-                tracing::info!(username = %sanitize_for_log(&username), "User logged out")
+        let duration = (Utc::now() - session.started_at).num_seconds().max(0) as u64;
+        self.log_activity(
+            "session_end",
+            Some(&session.username),
+            session.ip.as_deref(),
+            session.current_station.as_deref(),
+            Some(serde_json::json!({ "duration_seconds": duration })),
+        );
+        tracing::info!(username = %sanitize_for_log(&session.username), "User logged out");
+    }
+
+    pub fn admin_stats(&self) -> AdminStatsResponse {
+        let now = Utc::now();
+        let mut active_users = Vec::new();
+        for session in self.sessions.read().unwrap().values().cloned() {
+            if session.expires_at <= now
+                || !session.last_seen.is_some_and(|last_seen| {
+                    last_seen + chrono::Duration::minutes(ACTIVE_PRESENCE_TIMEOUT_MINUTES) > now
+                })
+            {
+                continue;
             }
-            None => tracing::debug!("Logout with unknown session"),
+            active_users.push(ActivePresence {
+                username: Some(session.username.clone()),
+                guest: false,
+                station: session.current_station.clone(),
+                ip: session.ip.clone().unwrap_or_else(|| "unknown".to_string()),
+                active_seconds: (now - session.started_at).num_seconds().max(0) as u64,
+                started_at: session.started_at.to_rfc3339(),
+            });
         }
+        active_users.sort_by(|left, right| left.username.cmp(&right.username));
+
+        let mut guests = Vec::new();
+        let mut guest_sessions = self.guest_sessions.write().unwrap();
+        guest_sessions.retain(|_, session| {
+            session.last_seen
+                + chrono::Duration::minutes(ACTIVE_PRESENCE_TIMEOUT_MINUTES)
+                > now
+        });
+        for session in guest_sessions.values().cloned() {
+            guests.push(ActivePresence {
+                username: None,
+                guest: true,
+                station: session.current_station,
+                ip: session.ip,
+                active_seconds: (now - session.started_at).num_seconds().max(0) as u64,
+                started_at: session.started_at.to_rfc3339(),
+            });
+        }
+        guests.sort_by(|left, right| left.ip.cmp(&right.ip));
+
+        AdminStatsResponse {
+            stats_enabled: self.stats_enabled,
+            guest_tracking_enabled: true,
+            active_users,
+            guests,
+        }
+    }
+
+    pub fn ensure_guest_session(
+        &self,
+        headers: &HeaderMap,
+        station: Option<&str>,
+    ) -> Option<(String, Option<String>)> {
+        if !self.stats_enabled {
+            return None;
+        }
+
+        let guest_id = Self::extract_guest_session_id(headers)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let ip = Self::real_ip(headers);
+        let now = Utc::now();
+        let entry = GuestSession {
+            id: guest_id.clone(),
+            started_at: now,
+            last_seen: now,
+            ip: ip.clone(),
+            user_agent: None,
+            current_station: station.map(str::to_owned),
+        };
+
+        let mut guest_sessions = self.guest_sessions.write().unwrap();
+        match guest_sessions.entry(guest_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(entry);
+                self.log_activity(
+                    "guest_session_start",
+                    None,
+                    Some(&ip),
+                    station,
+                    None,
+                );
+            }
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                let existing = existing.get_mut();
+                existing.last_seen = now;
+                if existing.ip.is_empty() {
+                    existing.ip = ip.clone();
+                }
+                if existing.current_station.as_deref() != station && station.is_some() {
+                    existing.current_station = station.map(str::to_owned);
+                    self.log_activity(
+                        "station_started",
+                        None,
+                        Some(&ip),
+                        station,
+                        Some(serde_json::json!({ "guest": true, "session_id": guest_id })),
+                    );
+                }
+            }
+        }
+
+        Some((guest_id, Some(ip)))
     }
 
     /// Session cookie name. The `__Host-` prefix tells browsers to accept the
     /// cookie only when set securely from the site's own host (no `Domain`
     /// attribute allowed), which defeats cookie tossing from sibling
-    /// subdomains served through the same reverse proxy.
-    const SESSION_COOKIE_NAME: &'static str = "__Host-session_id";
+    /// subdomains served through the same reverse proxy. If the app is served
+    /// over plain HTTP during local development, browsers reject `Secure`
+    /// cookies, so we fall back to the plain `session_id` name instead.
     /// Session ids are server-generated UUIDs; anything longer cannot be ours.
     const MAX_SESSION_ID_LEN: usize = 128;
 
-    pub fn extract_session_id(headers: &HeaderMap) -> Option<String> {
-        let prefix = format!("{}=", Self::SESSION_COOKIE_NAME);
+    fn extract_session_ids(headers: &HeaderMap) -> Vec<String> {
+        let prefixes = [
+            format!("{}=", Self::session_cookie_name(headers)),
+            "session_id=".to_string(),
+            "__Host-session_id=".to_string(),
+        ];
+        let mut session_ids = Vec::new();
         for value in headers.get_all("cookie") {
             let Ok(cookie_value) = value.to_str() else {
                 continue;
             };
             for part in cookie_value.split(';') {
                 let part = part.trim();
-                if let Some(session_id) = part.strip_prefix(prefix.as_str()) {
-                    if !session_id.is_empty() && session_id.len() <= Self::MAX_SESSION_ID_LEN {
-                        return Some(session_id.to_string());
+                for prefix in &prefixes {
+                    if let Some(session_id) = part.strip_prefix(prefix.as_str()) {
+                        if !session_id.is_empty()
+                            && session_id.len() <= Self::MAX_SESSION_ID_LEN
+                            && !session_ids.iter().any(|existing| existing == session_id)
+                        {
+                            session_ids.push(session_id.to_string());
+                        }
                     }
                 }
             }
         }
-        None
+        session_ids
+    }
+
+    pub fn extract_session_id(headers: &HeaderMap) -> Option<String> {
+        Self::extract_session_ids(headers).into_iter().next()
     }
 
     const SESSION_COOKIE_MAX_AGE: i64 = 365 * 24 * 60 * 60;
 
-    fn cookie_header(session_id: &str) -> HeaderValue {
+    fn cookie_header(session_id: &str, headers: &HeaderMap) -> HeaderValue {
+        let cookie_name = Self::session_cookie_name(headers);
+        let secure = Self::request_is_secure(headers);
         let expires = (Utc::now() + chrono::Duration::seconds(Self::SESSION_COOKIE_MAX_AGE))
             .format("%a, %d %b %Y %H:%M:%S GMT")
             .to_string();
 
         HeaderValue::from_str(&format!(
-            "{}={session_id}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={}; Expires={}",
-            Self::SESSION_COOKIE_NAME,
+            "{cookie_name}={session_id}; Path=/; HttpOnly;{} SameSite=Lax; Max-Age={}; Expires={}",
+            if secure { " Secure;" } else { "" },
             Self::SESSION_COOKIE_MAX_AGE,
             expires
         ))
         .expect("valid session cookie")
     }
 
-    fn clear_cookie_header() -> HeaderValue {
+    fn clear_cookie_header(cookie_name: &str, secure: bool) -> HeaderValue {
         HeaderValue::from_str(&format!(
-            "{}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax",
-            Self::SESSION_COOKIE_NAME
+            "{cookie_name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly;{} SameSite=Lax",
+            if secure { " Secure;" } else { "" }
         ))
         .expect("valid logout cookie")
+    }
+
+    pub fn admin_stats_response(&self, headers: HeaderMap) -> Response {
+        let actor = match self.session_user(&headers) {
+            Ok(actor) => actor,
+            Err(message) => return Self::unauthorized(message),
+        };
+        if actor.role != UserRole::Admin {
+            return Self::unauthorized("Admin access required");
+        }
+
+        let response = (StatusCode::OK, Json(self.admin_stats())).into_response();
+        Self::no_store(response)
+    }
+
+    pub fn heartbeat_response(&self, headers: HeaderMap, Json(payload): Json<HeartbeatRequest>) -> Response {
+        let now = Utc::now();
+        let station_name = payload.station.as_deref().filter(|s| !s.trim().is_empty());
+
+        if let Ok((session_id, user)) = self.session_with_user(&headers) {
+            let mut sessions = self.sessions.write().unwrap();
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.expires_at = now + chrono::Duration::days(365);
+                let previous_station = session.current_station.clone();
+                if station_name.is_some() && previous_station.as_deref() != station_name {
+                    self.log_activity(
+                        "station_started",
+                        Some(&user.username),
+                        session.ip.as_deref(),
+                        station_name,
+                        Some(serde_json::json!({ "session_id": session_id })),
+                    );
+                }
+                session.current_station = station_name.map(str::to_owned);
+            }
+            self.write_sessions(&sessions);
+            let response = (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
+            return Self::no_store(response);
+        }
+
+        if !self.stats_enabled {
+            return Self::unauthorized("Admin stats disabled");
+        }
+
+        let Some((guest_id, _)) = self.ensure_guest_session(&headers, station_name) else {
+            return (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
+        };
+
+        let response = (StatusCode::OK, Json(serde_json::json!({ "ok": true, "guest_id": guest_id }))).into_response();
+        let mut response = Self::no_store(response);
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, Self::guest_cookie_header(&guest_id, &headers));
+        response
     }
 
     /// Resolve the acting user from request headers, or the failure message
     /// for a 401 response.
     fn session_user(&self, headers: &HeaderMap) -> Result<User, &'static str> {
-        let Some(session_id) = Self::extract_session_id(headers) else {
-            return Err("Not authenticated");
-        };
+        self.session_with_user(headers).map(|(_, user)| user)
+    }
 
-        self.current_user_from_session(&session_id)
+    fn session_with_user(&self, headers: &HeaderMap) -> Result<(String, User), &'static str> {
+        let session_ids = Self::extract_session_ids(headers);
+        if session_ids.is_empty() {
+            return Err("Not authenticated");
+        }
+
+        session_ids
+            .into_iter()
+            .find_map(|session_id| {
+                self.current_user_from_session(&session_id)
+                    .map(|user| (session_id, user))
+            })
             .ok_or("Session expired")
     }
 
@@ -520,24 +1131,28 @@ impl AuthService {
     }
 
     /// Attach a refreshed session cookie to an auth JSON response.
-    fn with_session_cookie(response: Response, session_id: &str) -> Response {
+    fn with_session_cookie(response: Response, session_id: &str, headers: &HeaderMap) -> Response {
         let mut response = response;
         response
             .headers_mut()
-            .append(header::SET_COOKIE, Self::cookie_header(session_id));
+            .append(header::SET_COOKIE, Self::cookie_header(session_id, headers));
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            Self::clear_cookie_header(Self::alternate_session_cookie_name(headers), true),
+        );
         response
     }
 
     pub fn login_response(
         &self,
-        _headers: HeaderMap,
+        headers: HeaderMap,
         Json(payload): Json<LoginRequest>,
     ) -> Response {
-        match self.login(&payload.username, &payload.password) {
+        match self.login_with_context(&payload.username, &payload.password, &headers) {
             Ok((user, session_id)) => {
                 let response = (StatusCode::OK, Json(Self::user_json(&user))).into_response();
                 let response = Self::no_store(response);
-                Self::with_session_cookie(response, &session_id)
+                Self::with_session_cookie(response, &session_id, &headers)
             }
             Err(message) => (
                 if message.starts_with("Too many") {
@@ -552,31 +1167,47 @@ impl AuthService {
     }
 
     pub fn me_response(&self, headers: HeaderMap) -> Response {
-        let session_id = match Self::extract_session_id(&headers) {
-            Some(id) => id,
-            None => return Self::unauthorized("Not authenticated"),
-        };
-        let Some(user) = self.current_user_from_session(&session_id) else {
-            return Self::unauthorized("Session expired");
+        let (session_id, user) = match self.session_with_user(&headers) {
+            Ok(session) => session,
+            Err(message) => return Self::unauthorized(message),
         };
 
         let response = (StatusCode::OK, Json(Self::user_json(&user))).into_response();
         let response = Self::no_store(response);
-        Self::with_session_cookie(response, &session_id)
+        Self::with_session_cookie(response, &session_id, &headers)
     }
 
     pub fn logout_response(&self, headers: HeaderMap) -> Response {
-        if let Some(session_id) = Self::extract_session_id(&headers) {
+        for session_id in Self::extract_session_ids(&headers) {
             self.logout(&session_id);
+        }
+        if Self::extract_guest_session_id(&headers).is_some() {
+            let mut response = (
+                StatusCode::OK,
+                Json(serde_json::json!({ "success": true })),
+            )
+            .into_response();
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                Self::clear_guest_cookie_header(&headers),
+            );
+            return Self::no_store(response);
         }
 
         let response =
             (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response();
         let response = Self::no_store(response);
         let mut response = response;
-        response
-            .headers_mut()
-            .append(header::SET_COOKIE, Self::clear_cookie_header());
+        let secure = Self::request_is_secure(&headers);
+        let current_cookie_name = Self::session_cookie_name(&headers);
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            Self::clear_cookie_header(current_cookie_name, secure),
+        );
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            Self::clear_cookie_header(Self::alternate_session_cookie_name(&headers), true),
+        );
         response
     }
 
@@ -748,6 +1379,84 @@ mod tests {
         auth.change_password_for_user("admin", "secret", "brand-new")
             .unwrap();
         assert!(auth.current_user_from_session(&session_id).is_none());
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn insecure_local_http_sessions_are_accepted() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cookie", HeaderValue::from_static("session_id=abc123"));
+        assert_eq!(AuthService::extract_session_id(&headers), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn secure_proxied_sessions_still_use_host_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers.insert(
+            "cookie",
+            HeaderValue::from_static("__Host-session_id=abc123"),
+        );
+        assert_eq!(AuthService::extract_session_id(&headers), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn me_uses_valid_session_when_stale_cookie_is_also_present() {
+        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
+        let auth = AuthService::new(&temp_dir);
+        auth.ensure_default_admin("admin", "secret");
+        let (_, session_id) = auth.login("admin", "secret").unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers.insert(
+            "cookie",
+            HeaderValue::from_str(&format!("__Host-session_id=stale; session_id={session_id}"))
+                .unwrap(),
+        );
+
+        let response = auth.me_response(headers);
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn admin_stats_only_includes_recently_seen_users() {
+        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
+        let auth = AuthService::new(&temp_dir);
+        auth.ensure_default_admin("admin", "secret");
+        let (_, session_id) = auth.login("admin", "secret").unwrap();
+
+        assert_eq!(auth.admin_stats().active_users.len(), 1);
+        auth.sessions
+            .write()
+            .unwrap()
+            .get_mut(&session_id)
+            .unwrap()
+            .last_seen = Some(Utc::now() - chrono::Duration::minutes(4));
+        assert!(auth.admin_stats().active_users.is_empty());
+
+        assert!(auth.current_user_from_session(&session_id).is_some());
+        assert_eq!(auth.admin_stats().active_users.len(), 1);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn enabled_activity_log_is_created_and_receives_events() {
+        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
+        let mut auth = AuthService::new(&temp_dir);
+        auth.log_retention_days = 1;
+
+        auth.initialize_activity_log();
+        assert!(auth.activity_log_path.exists());
+        auth.log_activity("session_start", Some("admin"), None, None, None);
+
+        let contents = fs::read_to_string(&auth.activity_log_path).unwrap();
+        assert!(contents.contains("Session started | User: admin"));
+        assert!(!contents.trim_start().starts_with('{'));
 
         let _ = fs::remove_dir_all(temp_dir);
     }

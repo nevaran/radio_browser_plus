@@ -9,7 +9,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use web_sys::RequestCredentials;
 
 use crate::models::{
-    AppConfig, Country, FavoritePayload, FavoritesResponse, Language, Station, Tag, User,
+    AdminStats, AppConfig, Country, FavoritePayload, FavoritesResponse, Language, Station, Tag,
+    User,
 };
 
 async fn get_json<T: DeserializeOwned>(path: &str) -> Result<T, String> {
@@ -140,6 +141,19 @@ pub async fn fetch_me() -> Result<User, String> {
 
 pub async fn fetch_config() -> Result<AppConfig, String> {
     get_json("/api/config").await
+}
+
+pub async fn fetch_admin_stats() -> Result<AdminStats, String> {
+    get_json("/api/admin/stats").await
+}
+
+pub async fn heartbeat(station: Option<&str>) -> Result<(), String> {
+    let _: serde_json::Value = post_json(
+        "/api/heartbeat",
+        &serde_json::json!({ "station": station }),
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn login(username: &str, password: &str) -> Result<User, String> {

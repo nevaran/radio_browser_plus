@@ -98,11 +98,29 @@ pub fn LoginModal() -> impl IntoView {
                                 leptos::task::spawn_local(async move {
                                     match crate::api::login(&username, &password).await {
                                         Ok(user) => {
-                                            s.session_checked.set(true);
-                                            s.user.set(Some(user));
-                                            s.login_open.set(false);
-                                            s.ensure_favorites().await;
-                                            s.load_view();
+                                            match crate::api::fetch_me().await {
+                                                Ok(session_user)
+                                                    if session_user.username.eq_ignore_ascii_case(&user.username) =>
+                                                {
+                                                    s.session_checked.set(true);
+                                                    s.user.set(Some(session_user));
+                                                    s.login_open.set(false);
+                                                    s.ensure_favorites().await;
+                                                    s.load_view();
+                                                }
+                                                Ok(_) => s.show_alert(
+                                                    "Sign in",
+                                                    "The server returned a different session than the account that signed in. Please try again.",
+                                                ),
+                                                Err(error) if error == "unauthorized" => s.show_alert(
+                                                    "Sign in",
+                                                    "The credentials were accepted, but the browser did not retain a valid session. Check the reverse-proxy cookie and HTTPS configuration.",
+                                                ),
+                                                Err(error) => s.show_alert(
+                                                    "Sign in",
+                                                    format!("Could not verify the new session: {error}"),
+                                                ),
+                                            }
                                         }
                                         Err(e) => s.show_alert("Sign in", e),
                                     }

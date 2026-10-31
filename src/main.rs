@@ -23,7 +23,9 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use radio_browser_plus::{
-    auth::{AuthService, ChangePasswordRequest, CreateUserRequest, LoginRequest},
+    auth::{
+        AuthService, ChangePasswordRequest, CreateUserRequest, HeartbeatRequest, LoginRequest,
+    },
     features::{CollectionsHandlers, FavoritesHandlers, HealthHandlers, StationsHandlers},
     infra::RadioBrowserClient,
 };
@@ -53,10 +55,18 @@ async fn main() {
     let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
     info!(data_dir = %data_dir, "Using data directory");
     let allow_guest = allow_guest_access();
+    let admin_stats_enabled = admin_stats_enabled();
+    let log_retention_days = log_retention_days();
     if allow_guest {
         tracing::warn!("ALLOW_GUEST_ACCESS is enabled: the app can be browsed without logging in");
     } else {
         info!("Guest access disabled: sign-in required");
+    }
+    if admin_stats_enabled {
+        tracing::info!("ADMIN_STATS_ENABLED is on: active user/guest statistics are exposed to admins");
+    }
+    if log_retention_days > 0 {
+        tracing::info!(days = log_retention_days, "Activity logs retained for {} days", log_retention_days);
     }
     let auth = Arc::new(AuthService::new(&data_dir));
     auth.ensure_default_admin("admin", "admin");
@@ -96,6 +106,8 @@ async fn main() {
     let auth_me = auth.clone();
     let auth_users = auth.clone();
     let auth_change_password = auth.clone();
+    let auth_stats = auth.clone();
+    let auth_heartbeat = auth.clone();
 
     // Build router
     let api = Router::new()
@@ -193,6 +205,20 @@ async fn main() {
             post(move |headers: HeaderMap, payload: Json<ChangePasswordRequest>| {
                 let a = auth_change_password.clone();
                 async move { a.change_password_response(headers, payload) }
+            }),
+        )
+        .route(
+            "/api/admin/stats",
+            get(move |headers: HeaderMap| {
+                let a = auth_stats.clone();
+                async move { a.admin_stats_response(headers) }
+            }),
+        )
+        .route(
+            "/api/heartbeat",
+            post(move |headers: HeaderMap, payload: Json<HeartbeatRequest>| {
+                let a = auth_heartbeat.clone();
+                async move { a.heartbeat_response(headers, payload) }
             }),
         )
         // Favorites endpoints
@@ -318,6 +344,22 @@ fn allow_guest_access() -> bool {
     parse_guest_flag(env::var("ALLOW_GUEST_ACCESS").ok().as_deref())
 }
 
+fn parse_admin_stats_flag(raw: Option<&str>) -> bool {
+    parse_guest_flag(raw)
+}
+
+fn admin_stats_enabled() -> bool {
+    parse_admin_stats_flag(env::var("ADMIN_STATS_ENABLED").ok().as_deref())
+}
+
+fn parse_log_retention_days(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or(0)
+}
+
+fn log_retention_days() -> u64 {
+    parse_log_retention_days(env::var("LOG_RETENTION_DAYS").ok().as_deref())
+}
+
 /// Auth state shared with the API middleware.
 #[derive(Clone)]
 struct ApiAuth {
@@ -357,7 +399,9 @@ async fn require_auth(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_public_api_path, parse_guest_flag};
+    use super::{
+        is_public_api_path, parse_admin_stats_flag, parse_guest_flag, parse_log_retention_days,
+    };
 
     #[test]
     fn guest_flag_defaults_to_off() {
@@ -375,6 +419,17 @@ mod tests {
         for raw in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
             assert!(parse_guest_flag(Some(raw)), "{raw:?} must allow guests");
         }
+    }
+
+    #[test]
+    fn admin_stats_flag_and_log_retention_days_parse_cleanly() {
+        assert!(parse_admin_stats_flag(Some("1")));
+        assert!(parse_admin_stats_flag(Some("true")));
+        assert!(!parse_admin_stats_flag(Some("0")));
+        assert_eq!(parse_log_retention_days(Some("7")), 7);
+        assert_eq!(parse_log_retention_days(None), 0);
+        assert_eq!(parse_log_retention_days(Some("0")), 0);
+        assert_eq!(parse_log_retention_days(Some("30")), 30);
     }
 
     #[test]

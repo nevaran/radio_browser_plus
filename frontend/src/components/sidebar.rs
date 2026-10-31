@@ -65,6 +65,7 @@ pub fn Sidebar() -> impl IntoView {
     let st = use_context::<AppState>().expect("AppState provided");
     let store = StoredValue::new(st.clone());
     let user = st.user;
+    let admin_stats_open = st.admin_stats_open;
     let sidebar_open = st.sidebar_open;
     let login_open = st.login_open;
     let allow_guest = st.allow_guest;
@@ -197,6 +198,7 @@ pub fn Sidebar() -> impl IntoView {
                                     leptos::task::spawn_local(async move {
                                         let _ = crate::api::logout().await;
                                         s.user.set(None);
+                                        s.admin_stats.set(None);
                                         s.favorites.set(Default::default());
                                         s.favorites_loaded.set(false);
                                         if s.allow_guest.get_untracked() {
@@ -232,6 +234,19 @@ pub fn Sidebar() -> impl IntoView {
                         on:click=move |_| create_user_open.set(true)
                     >
                         "Create user"
+                    </button>
+                    <button
+                        id="admin-stats-button"
+                        class="side-action admin-side-action"
+                        on:click=move |_| {
+                            let next = !admin_stats_open.get_untracked();
+                            admin_stats_open.set(next);
+                            if next {
+                                store.with_value(|s| s.refresh_admin_stats());
+                            }
+                        }
+                    >
+                        "Active sessions"
                     </button>
                 </div>
             </Show>

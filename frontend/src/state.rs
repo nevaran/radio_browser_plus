@@ -12,8 +12,8 @@ use wasm_bindgen::JsCast;
 
 use crate::api;
 use crate::models::{
-    favorite_to_station, station_id, CollectionItem, Country, Favorite, Language, Station, Tag,
-    User,
+    favorite_to_station, station_id, AdminStats, CollectionItem, Country, Favorite, Language,
+    Station, Tag, User,
 };
 use crate::player::Player;
 use crate::utils::{
@@ -97,6 +97,8 @@ pub struct AppState {
     pub favorites_loaded: RwSignal<bool>,
     pub metadata_refreshed: RwSignal<HashSet<String>>,
     pub user: RwSignal<Option<User>>,
+    pub admin_stats: RwSignal<Option<AdminStats>>,
+    pub admin_stats_open: RwSignal<bool>,
     /// True once the initial session restore (`/api/me` at startup) has
     /// resolved. Until then `user == None` means "unknown", not "logged out",
     /// and must not trigger the login gate.
@@ -142,6 +144,8 @@ impl AppState {
             favorites_loaded: RwSignal::new(false),
             metadata_refreshed: RwSignal::new(HashSet::new()),
             user: RwSignal::new(None),
+            admin_stats: RwSignal::new(None),
+            admin_stats_open: RwSignal::new(false),
             session_checked: RwSignal::new(false),
             allow_guest: RwSignal::new(false),
             dialog: RwSignal::new(None),
@@ -173,6 +177,8 @@ impl AppState {
     pub fn handle_unauthorized(&self) {
         self.session_checked.set(true);
         self.user.set(None);
+        self.admin_stats.set(None);
+        self.admin_stats_open.set(false);
         self.favorites.set(Default::default());
         self.favorites_loaded.set(false);
         self.stations.set(Vec::new());
@@ -182,6 +188,39 @@ impl AppState {
         self.view_error.set(None);
         // Guest mode degrades to anonymous browsing instead of forcing sign-in.
         self.login_open.set(!self.allow_guest.get_untracked());
+    }
+
+    pub fn refresh_admin_stats(&self) {
+        let this = self.clone();
+        leptos::task::spawn_local(async move {
+            match api::fetch_admin_stats().await {
+                Ok(stats) => this.admin_stats.set(Some(stats)),
+                Err(error) => {
+                    if error == "unauthorized" {
+                        this.handle_unauthorized();
+                    } else {
+                        web_sys::console::error_1(&error.into());
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn send_heartbeat(&self) {
+        if !self.session_checked.get_untracked()
+            || (!self.is_logged_in() && !self.allow_guest.get_untracked())
+        {
+            return;
+        }
+
+        let station = self
+            .player
+            .current
+            .get_untracked()
+            .map(|station| station.name);
+        leptos::task::spawn_local(async move {
+            let _ = api::heartbeat(station.as_deref()).await;
+        });
     }
 
     /// Route API failures: an auth rejection locks the UI, anything else is

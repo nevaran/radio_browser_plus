@@ -161,6 +161,34 @@ pub struct User {
     pub role: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PresenceEntry {
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub guest: bool,
+    #[serde(default)]
+    pub station: Option<String>,
+    #[serde(default)]
+    pub ip: String,
+    #[serde(default)]
+    pub active_seconds: u64,
+    #[serde(default)]
+    pub started_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AdminStats {
+    #[serde(default)]
+    pub stats_enabled: bool,
+    #[serde(default)]
+    pub guest_tracking_enabled: bool,
+    #[serde(default)]
+    pub active_users: Vec<PresenceEntry>,
+    #[serde(default)]
+    pub guests: Vec<PresenceEntry>,
+}
+
 /// Public runtime config from `/api/config`. Unknown fields are ignored so
 /// older frontends keep working against newer backends and vice versa.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

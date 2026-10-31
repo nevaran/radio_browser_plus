@@ -881,6 +881,126 @@ a:focus-visible,
   to { opacity: 1; transform: none; }
 }
 
+.stats-modal {
+  width: min(860px, calc(100vw - 2rem));
+  max-height: min(80vh, 760px);
+  overflow: auto;
+}
+
+.admin-stats-panel-shell {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  min-height: 0;
+}
+
+.admin-stats-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.admin-stats-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.admin-stats-close {
+  min-width: 72px;
+}
+
+.stats-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.stats-summary span {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.55rem;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.stats-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.stats-panel {
+  min-height: 0;
+  background: rgba(10, 14, 22, 0.46);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.8rem;
+}
+
+.stats-panel h4 {
+  margin: 0 0 0.7rem;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.stats-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  max-height: clamp(5rem, 24vh, 14rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.stats-entry,
+.stats-empty {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(17, 24, 39, 0.8);
+  padding: 0.65rem 0.7rem;
+}
+
+.stats-empty {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.stats-entry-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.9rem;
+}
+
+.stats-entry-head strong {
+  color: var(--text);
+}
+
+.stats-entry-head span,
+.stats-entry-meta {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
 .auth-modal-backdrop {
   position: absolute;
   inset: 0;

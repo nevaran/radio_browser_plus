@@ -1,168 +1,95 @@
 # Radio Browser Plus
 
-A standalone web application for discovering, streaming, and organizing radio stations from the [Radio Browser API](https://www.radio-browser.info/).
-
-Radio Browser Plus was initially taken from the Home Assistant Radio Browser integration and then developed and improved into a standalone app and migrated to Rust for performance and security improvements. It keeps the useful radio-station discovery experience while adding its own web interface, authentication, favorites, collections, and persistent data storage.
-
-Both the backend and the frontend are written in Rust: the backend is an
-Axum JSON API, and the browser UI is a [Leptos](https://leptos.dev/) WebAssembly
-single-page app (client-side rendering) that talks to that API.
+A self-hosted web app for discovering, streaming, and organizing stations from the [Radio Browser API](https://www.radio-browser.info/). The backend is an Axum JSON API; the browser client is a Rust and [Leptos](https://leptos.dev/) WebAssembly single-page app.
 
 ## Features
 
-- Browse radio stations by:
-  - **All Stations**: Every station fetched in a large list
-  - **Popular**: Most clicked stations
-  - **Favorites**: Browse only favorited radios
-  - **Countries**: Find stations by country of origin
-  - **Languages**: Filter by language using certain tags
-  - **Genre**: Discover stations using certain tags
-- Search functionality to find specific radio stations
-- Sort station lists by name, most played, or bitrate (remembered per browser)
-- Loading skeletons and empty states for every view
-- Station grids render incrementally (infinite scroll + Load more) with a stable full-list scrollbar, so catalogs with thousands of entries stay fast
-- Failed view loads retry automatically and surface a Retry action instead of failing silently
-- Stream audio through any device that supports a web browser
-- Keyboard shortcuts: `/` focus search, `Space` play/stop, `M` mute, arrows volume
-- User authentication and per-user favorites
-- Persistent favorites stored in the local `data/` directory
+- Browse all or popular stations, and explore by country, language, or genre.
+- Search and sort by name, popularity, or bitrate.
+- Stream stations with playback controls and resilient reconnect behavior.
+- Create accounts and save per-user favorites.
+- Optionally allow guest browsing.
+- Admins can view active users and guests, including their current station, IP address, and active time.
+- Optionally record account, session, and station activity in a retained text log.
+- Incremental station grids, retry states, and mobile-friendly layouts.
 
-## Installation
+Keyboard shortcuts: `/` focuses search, `Space` toggles playback, `M` toggles mute, and the arrow keys adjust volume.
 
-### Docker
+## Docker Deployment
 
-The container stores application data in the local `data/` directory. Start it
-with Docker Compose:
+1. Copy `.env.example` to `.env` and set the options described below.
+2. Ensure the external Docker network `proxy-frontend` exists:
+
+   ```bash
+   docker network create proxy-frontend
+   ```
+
+   Skip this if the network already exists.
+3. Build and start the app:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+Compose attaches the app to `proxy-frontend` and does not publish port 8000 on the host. Configure your reverse proxy on that network to forward to `radio-browser-plus:8000` and terminate HTTPS there. For direct local access, uncomment the port mapping in `docker-compose.yml`.
+
+The `./data` directory is mounted at `/app/data` and persists users, sessions, favorites, and the optional activity log. The container runs as a non-root user, drops Linux capabilities, and uses a read-only root filesystem.
+
+## Configuration
+
+Set these variables in `.env`; Compose forwards them to the container.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RADIO_BROWSER_STATION_LIMIT` | `1000` | Default station request limit. `0` uses the default. |
+| `ALLOW_GUEST_ACCESS` | `0` | Set to `1`, `true`, `yes`, or `on` to allow browsing without signing in. Favorites and account actions still require an account. |
+| `ADMIN_STATS_ENABLED` | `0` | Enable the admin-only active sessions view and presence tracking. |
+| `LOG_RETENTION_DAYS` | `0` | Keep activity entries for this many days. `0` disables activity logging. When enabled, the readable log is written to `/app/data/activity.log`. |
+
+The active sessions view reports clients that send periodic page heartbeats; entries expire after the heartbeat timeout. The activity log can contain usernames, IP addresses, and station names. Keep the data directory private and do not expose the log through the web server.
+
+### First Login
+
+On an empty data directory, the server creates the default account `admin` / `admin`. Sign in and change that password immediately before exposing the service. The server logs a warning while the default password remains in use.
+
+## Run from Source
+
+Requirements: Rust 1.98 or newer, Cargo, the `wasm32-unknown-unknown` target, and [Trunk](https://trunkrs.dev/).
+
+Install the frontend toolchain if needed:
 
 ```bash
-docker compose build && docker compose up -d
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
 ```
 
-The Compose volume maps `./data` to `/app/data`, so favorites and user data
-survive container recreation. The application is available at
-`http://localhost:8000`.
-
-The container runs as a non-root user and does not require Linux capabilities for its web server, file access, or outbound API requests thus the use of
-```yaml
-cap_drop:
-  - ALL
-```
-
-`RADIO_BROWSER_STATION_LIMIT` controls the default number of stations fetched
-per request and defaults to `1000`. Set it in `.env` to change the default
-(`0` behaves like the default). Explicit `?limit=` values are passed through
-to the upstream API uncapped. Collection cards cap their displayed counts at
-the default, matching what a click actually fetches.
-
-### From source
-
-Requirements:
-
-- Rust 1.98+
-- Cargo
-- For frontend work: the `wasm32-unknown-unknown` target and
-  Trunk(`rustup target add wasm32-unknown-unknown`
-  and `cargo install trunk --locked`)
-
-The repo is a Cargo workspace (backend + `frontend/` members) with a single
-`Cargo.lock` and a single `target/` directory at the root; Trunk also writes
-its output to the root `dist/`. Plain `cargo build` / `cargo test` only target
-the backend — the wasm-only frontend is built explicitly via Trunk.
-
-Build the frontend once (output goes to `dist/`, served by the backend):
+Build the frontend and start the backend from the repository root:
 
 ```bash
 cd frontend && trunk build --release && cd ..
-```
-
-Run the application with:
-
-```bash
 cargo run --release
 ```
 
-The server listens on port `8000` by default and serves the API plus the
-built frontend from `dist/`.
+The server listens on port 8000 and serves the API and built frontend from `dist/`. The Cargo workspace shares one `Cargo.lock` and one root `target/` directory.
 
-### Frontend development
+### Frontend Development
 
-The Leptos app lives in `frontend/` and calls the same `/api/*` endpoints as
-the previous JavaScript UI — the backend API is unchanged. For UI work, run
-the backend and the Trunk dev server (which proxies `/api` and `/health` to
-port 8000) side by side:
+Run the backend in one terminal and Trunk in another:
 
 ```bash
 cargo run
+```
+
+```bash
 cd frontend && trunk serve
 ```
 
-Then open the URL printed by Trunk (port 8080 by default).
+Trunk serves the frontend (port 8080 by default) and proxies `/api` and `/health` to the backend on port 8000.
 
-## First Configuration
-1. Open `http://localhost:8000` in a browser
-2. Sign in with the application user account. Default first user is admin/admin
-3. Change the admin password immediately (Account → Change Password). The
-   server logs a warning on startup while the default password is in use.
-4. Browse or search for radio stations, create more users
-5. Select a station to stream it
+## Support and Credits
 
-All API endpoints except sign-in/sign-out require authentication, and the web
-UI blocks usage behind the sign-in dialog until you are logged in.
-
-To allow anonymous browsing, set `ALLOW_GUEST_ACCESS=1`. Guests can browse,
-search, and play stations without an account, but account management and
-favorites stay hidden until they sign in. The default (`0`/unset) requires
-login for everything.
-
-## Usage
-
-After signing in, browse popular stations, search the Radio Browser catalog,
-filter stations by country, language, or tags, and select a station to stream.
-
-### Features
-
-- ⭐ Favorites appear first in the media browser
-- Favorited stations are marked with a yellow star (⭐)
-- Favorites are stored per Home Assistant config entry
-- Favorites persist across restarts
-- Native Home Assistant entities for favorites management
-- Separate favorites list for each Radio Browser Plus integration
-
-## Frontend architecture (Leptos)
-
-- `frontend/src/` — components (`sidebar`, `station_grid`, `collection_grid`,
-  `now_playing`, `auth_modals`), typed API client (`api.rs`), reactive state
-  (`state.rs`), audio playback (`player.rs`), data models (`models.rs`), pure
-  helpers (`utils.rs`, covered by unit tests).
-- `frontend/index.html` — Trunk entry shell; Trunk injects the WASM bundle,
-  the (unchanged) stylesheet, the favicon, and the flag icons (`/flags/*`).
-- The Axum backend serves the root `dist/` (see `Dockerfile`, which builds the
-  frontend with Trunk and then the backend as a static binary).
-
-Notes on the migration from the previous JavaScript UI (`public/app.js`,
-`public/sort-worker.js`, removed):
-
-- Same views (All, Popular, Favorites, Countries, Languages, Genres), search
-  with debounce, `#view/filter` hash deep links, auth dialogs, favorites with
-  live metadata refresh, now-playing bar with stream-health indicator, volume /
-  mute with persistence, and keyboard shortcuts (`/`, `M`, `Space`, arrows).
-- Performance: fine-grained reactivity re-renders only changed nodes; sorting
-  runs directly in WASM (the sort Web Worker was removed as obsolete); station
-  artwork uses native lazy loading.
-- One intentional behavior fix: the old retry chain cleared its "is playing"
-  flag before checking it, so it could never run. The Rust player tracks
-  playback intent explicitly, so the 5 × 3s retry chain now works.
-
-## Support
-
-For issues, feature requests, or questions, please visit the [GitHub repository](https://github.com/nevaran/radio_browser_plus/issues).
+For issues and feature requests, use the [GitHub issue tracker](https://github.com/nevaran/radio_browser_plus/issues). Station data is provided by [Radio Browser](https://www.radio-browser.info/).
 
 ## License
 
-This project is licensed under a Personal and Non-Commercial Use License - see the LICENSE file for details.
-
-## Credits
-
-The project was initially based on the [Home Assistant Radio Browser integration](https://www.home-assistant.io/integrations/radio_browser/), then made and improved into a standalone application.
-
-Radio station data provided by [Radio Browser](https://www.radio-browser.info/).
+Personal and non-commercial use only. See [LICENSE](LICENSE) for the full terms.

@@ -373,16 +373,33 @@ impl AuthService {
         self.log_retention_days > 0
     }
 
+    fn open_activity_log(&self) -> std::io::Result<fs::File> {
+        let mut options = fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let file = options.open(&self.activity_log_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                &self.activity_log_path,
+                fs::Permissions::from_mode(0o600),
+            )?;
+        }
+        Ok(file)
+    }
+
     fn initialize_activity_log(&self) {
         if !self.activity_log_enabled() {
             return;
         }
 
-        match fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.activity_log_path)
-        {
+        match self.open_activity_log() {
             Ok(_) => self.prune_activity_log(),
             Err(error) => tracing::error!(
                 path = %self.activity_log_path.display(),
@@ -502,11 +519,7 @@ impl AuthService {
         }
         let entry = fields.join(" | ");
 
-        let mut file = match fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.activity_log_path)
-        {
+        let mut file = match self.open_activity_log() {
             Ok(file) => file,
             Err(error) => {
                 tracing::error!(
@@ -1682,6 +1695,17 @@ mod tests {
         auth.initialize_activity_log();
         assert!(auth.activity_log_path.exists());
         auth.log_activity("session_start", Some("admin"), None, None, None);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&auth.activity_log_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
 
         let contents = fs::read_to_string(&auth.activity_log_path).unwrap();
         assert!(contents.contains("Session started | User: admin"));

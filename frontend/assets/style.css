@@ -881,44 +881,55 @@ a:focus-visible,
   to { opacity: 1; transform: none; }
 }
 
-.stats-modal {
-  width: min(860px, calc(100vw - 2rem));
-  max-height: min(80vh, 760px);
-  overflow: auto;
+/* Admin "Active sessions" opens as a dialog instead of inline content, so it
+   can never squeeze the station grid or overlap the now-playing bar. The body
+   scrolls inside the dialog, keeping the title and summary in view. */
+.admin-stats-modal {
+  align-items: center;
+  padding: max(1rem, env(safe-area-inset-top, 0px)) 1rem
+    max(1rem, env(safe-area-inset-bottom, 0px));
 }
 
-.admin-stats-panel-shell {
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--hairline);
+.auth-modal-content.stats-modal {
+  width: min(860px, calc(100vw - 2rem));
+  max-height: min(calc(var(--viewport-height) - 2rem), 760px);
   display: flex;
   flex-direction: column;
-  gap: 0.85rem;
-  min-height: 0;
+  overflow: hidden;
+  padding: 1.25rem 1.35rem 1.35rem;
 }
 
-.admin-stats-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
+.stats-modal .admin-stats-header {
+  flex-shrink: 0;
+  align-items: flex-start;
+  margin-bottom: 0.85rem;
 }
 
-.admin-stats-header h3 {
+.admin-stats-heading {
+  min-width: 0;
+}
+
+.stats-modal .admin-stats-header h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 1.12rem;
   font-weight: 800;
   letter-spacing: -0.02em;
 }
 
-.admin-stats-close {
-  min-width: 72px;
+.admin-stats-subtitle {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 550;
 }
 
 .stats-summary {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
+  flex-shrink: 0;
+  margin-bottom: 0.9rem;
   color: var(--text-dim);
   font-size: 0.8rem;
   font-weight: 650;
@@ -933,14 +944,43 @@ a:focus-visible,
   border: 1px solid var(--border);
 }
 
+/* Single scroll container on narrow screens: the two presence lists stay in
+   normal flow and the dialog body scrolls, avoiding nested scroll traps. */
+.admin-stats-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.25rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+.admin-stats-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.admin-stats-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.admin-stats-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(251, 191, 36, 0.4);
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
 .stats-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: 1rem;
 }
 
 .stats-panel {
-  min-height: 0;
+  min-width: 0;
   background: rgba(10, 14, 22, 0.46);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -963,10 +1003,6 @@ a:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
-  max-height: clamp(5rem, 24vh, 14rem);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
 }
 
 .stats-entry,
@@ -984,6 +1020,7 @@ a:focus-visible,
 
 .stats-entry-head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 0.5rem;
   margin-bottom: 0.3rem;
@@ -991,7 +1028,13 @@ a:focus-visible,
 }
 
 .stats-entry-head strong {
+  min-width: 0;
   color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.stats-entry-time {
+  flex-shrink: 0;
 }
 
 .stats-entry-head span,
@@ -999,6 +1042,7 @@ a:focus-visible,
   color: var(--text-dim);
   font-size: 0.72rem;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .auth-modal-backdrop {
@@ -2471,6 +2515,46 @@ a:focus-visible,
     width: 19px;
     height: 19px;
   }
+
+  /* Active sessions becomes a near-full-width bottom sheet on phones: it
+     stays inside the measured viewport (and system safe areas) while the
+     grid and player underneath keep their layout untouched. */
+  .admin-stats-modal {
+    align-items: flex-end;
+    padding: calc(0.5rem + env(safe-area-inset-top, 0px)) 0.5rem
+      calc(0.5rem + max(var(--sab), var(--sab-min)));
+  }
+
+  .auth-modal-content.stats-modal {
+    width: 100%;
+    max-height: calc(
+      var(--viewport-height) - env(safe-area-inset-top, 0px) -
+        max(var(--sab), var(--sab-min)) - 1rem
+    );
+    padding: 1rem;
+    border-radius: var(--radius-lg);
+  }
+
+  .stats-modal .admin-stats-header {
+    margin-bottom: 0.7rem;
+  }
+
+  .stats-summary {
+    margin-bottom: 0.7rem;
+  }
+
+  .stats-columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.6rem;
+  }
+
+  .stats-panel {
+    padding: 0.7rem;
+  }
+
+  .admin-stats-body {
+    padding-right: 0;
+  }
 }
 
 .now-playing-bar.compact .favorite-current {
@@ -2607,5 +2691,18 @@ a:focus-visible,
 
   .now-playing-details {
     font-size: 0.55rem;
+  }
+
+  .auth-modal-content.stats-modal {
+    padding: 0.85rem 0.8rem;
+    border-radius: var(--radius-md);
+  }
+
+  .stats-entry {
+    padding: 0.55rem 0.6rem;
+  }
+
+  .stats-entry-head {
+    font-size: 0.84rem;
   }
 }

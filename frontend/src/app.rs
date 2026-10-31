@@ -5,23 +5,11 @@ use leptos::prelude::*;
 use wasm_bindgen::{closure::Closure, JsCast};
 
 use crate::components::{
-    ChangePasswordModal, CollectionGrid, CreateUserModal, Dialog, LoginModal, NowPlaying, Sidebar,
-    StationGrid,
+    ActiveSessionsModal, ChangePasswordModal, CollectionGrid, CreateUserModal, Dialog, LoginModal,
+    NowPlaying, Sidebar, StationGrid,
 };
 use crate::state::{AppState, STATION_REFRESH_MS};
 use crate::utils::{format_count, SortMode};
-
-fn format_elapsed_seconds(total: u64) -> String {
-    let hours = total / 3_600;
-    let minutes = (total % 3_600) / 60;
-    let seconds = total % 60;
-
-    match hours {
-        0 if minutes == 0 => format!("{seconds}s"),
-        0 => format!("{minutes}m {seconds}s"),
-        hours => format!("{hours}h {minutes}m {seconds}s"),
-    }
-}
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -39,12 +27,6 @@ pub fn App() -> impl IntoView {
     let err_text = state.clone();
     let err_retry = StoredValue::new(state.clone());
     let err_dismiss = StoredValue::new(state.clone());
-    let admin_stats_state = state.clone();
-    let admin_panel_state = admin_stats_state.clone();
-    let show_stats_state = admin_panel_state.clone();
-    let stats_summary_state = admin_panel_state.clone();
-    let users_state = admin_panel_state.clone();
-    let guests_state = admin_panel_state.clone();
     let grid_view = state.view;
     let grid_filter = state.filter;
     let loading = state.loading;
@@ -199,112 +181,10 @@ pub fn App() -> impl IntoView {
                         }
                     }}
                 </div>
-                <Show when=move || show_stats_state.admin_stats_open.get() && show_stats_state.is_admin()>
-                    <section class="admin-stats-panel-shell" aria-live="polite">
-                        <div class="admin-stats-header">
-                            <h3>"Active sessions"</h3>
-                            <button
-                                type="button"
-                                class="secondary-button admin-stats-close"
-                                on:click=move |_| admin_panel_state.admin_stats_open.set(false)
-                            >
-                                "Hide"
-                            </button>
-                        </div>
-
-                        <div class="stats-summary">
-                            {move || {
-                                let stats = stats_summary_state.admin_stats.get();
-                                match stats.as_ref() {
-                                    Some(stats) => view! {
-                                        <span>{format!("{} active users", stats.active_users.len())}</span>
-                                        <span>{format!("{} guests", stats.guests.len())}</span>
-                                    }
-                                        .into_any(),
-                                    None => view! { <span>"Loading…"</span> }.into_any(),
-                                }
-                            }}
-                        </div>
-
-                        <div class="stats-columns">
-                            <div class="stats-panel">
-                                <h4>"Users"</h4>
-                                <ul class="stats-list">
-                                    {move || {
-                                        let entries = users_state
-                                            .admin_stats
-                                            .get()
-                                            .map(|stats| stats.active_users)
-                                            .unwrap_or_default();
-                                        if entries.is_empty() {
-                                            return view! { <li class="stats-empty">"No active users"</li> }.into_any();
-                                        }
-                                        let items = entries
-                                            .into_iter()
-                                            .map(|entry| {
-                                                let username = entry.username.clone().unwrap_or_else(|| "Unknown".to_string());
-                                                let station = entry.station.clone().unwrap_or_else(|| "No station".to_string());
-                                                let ip = entry.ip.clone();
-                                                let elapsed = format_elapsed_seconds(entry.active_seconds);
-                                                view! {
-                                                    <li class="stats-entry">
-                                                        <div class="stats-entry-head">
-                                                            <strong>{username}</strong>
-                                                            <span>{elapsed}</span>
-                                                        </div>
-                                                        <div class="stats-entry-meta">{station}</div>
-                                                        <div class="stats-entry-meta">{ip}</div>
-                                                    </li>
-                                                }
-                                                .into_any()
-                                            })
-                                            .collect::<Vec<_>>();
-                                        view! { <>{items}</> }.into_any()
-                                    }}
-                                </ul>
-                            </div>
-
-                            <div class="stats-panel">
-                                <h4>"Guests"</h4>
-                                <ul class="stats-list">
-                                    {move || {
-                                        let entries = guests_state
-                                            .admin_stats
-                                            .get()
-                                            .map(|stats| stats.guests)
-                                            .unwrap_or_default();
-                                        if entries.is_empty() {
-                                            return view! { <li class="stats-empty">"No active guests"</li> }.into_any();
-                                        }
-                                        let items = entries
-                                            .into_iter()
-                                            .map(|entry| {
-                                                let station = entry.station.clone().unwrap_or_else(|| "No station".to_string());
-                                                let ip = entry.ip.clone();
-                                                let elapsed = format_elapsed_seconds(entry.active_seconds);
-                                                view! {
-                                                    <li class="stats-entry">
-                                                        <div class="stats-entry-head">
-                                                            <strong>"Guest"</strong>
-                                                            <span>{elapsed}</span>
-                                                        </div>
-                                                        <div class="stats-entry-meta">{station}</div>
-                                                        <div class="stats-entry-meta">{ip}</div>
-                                                    </li>
-                                                }
-                                                .into_any()
-                                            })
-                                            .collect::<Vec<_>>();
-                                        view! { <>{items}</> }.into_any()
-                                    }}
-                                </ul>
-                            </div>
-                        </div>
-                    </section>
-                </Show>
                 <NowPlaying />
             </main>
         </div>
+        <ActiveSessionsModal />
         <LoginModal />
         <CreateUserModal />
         <ChangePasswordModal />
@@ -431,7 +311,13 @@ fn init_app(state: AppState) {
                 return;
             }
             if ev.key() == "Escape" {
-                state.sidebar_open.set(false);
+                // Close the topmost overlay first: the admin dialog should
+                // not leave the mobile navigation drawer exposed behind it.
+                if state.admin_stats_open.get_untracked() {
+                    state.admin_stats_open.set(false);
+                } else {
+                    state.sidebar_open.set(false);
+                }
                 return;
             }
             // Media keys on keyboards that surface as key events (most OS

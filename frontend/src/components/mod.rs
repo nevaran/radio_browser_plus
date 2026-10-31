@@ -1,3 +1,4 @@
+pub mod admin_stats;
 pub mod auth_modals;
 pub mod collection_grid;
 pub mod dialog;
@@ -5,6 +6,7 @@ pub mod now_playing;
 pub mod sidebar;
 pub mod station_grid;
 
+pub use admin_stats::ActiveSessionsModal;
 pub use auth_modals::{ChangePasswordModal, CreateUserModal, LoginModal};
 pub use collection_grid::CollectionGrid;
 pub use dialog::Dialog;

@@ -111,6 +111,20 @@ struct GuestSession {
     current_station: Option<String>,
 }
 
+/// In-memory activity tracker, one record per browser identity (per IP for
+/// guests). Records exist only for clients that actually loaded the app page:
+/// `/api/heartbeat` creates and refreshes them, nothing else does, and they
+/// are never persisted so a server restart starts with an empty tracker.
+#[derive(Debug, Clone)]
+struct PresenceRecord {
+    username: Option<String>,
+    guest: bool,
+    ip: String,
+    station: Option<String>,
+    started_at: chrono::DateTime<Utc>,
+    last_seen: chrono::DateTime<Utc>,
+}
+
 /// Username allowlist: normalized usernames must match this. It keeps
 /// per-user file paths (`user-<name>/...`) free of traversal sequences.
 pub const MAX_USERNAME_LEN: usize = 64;
@@ -147,6 +161,7 @@ pub struct AuthService {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     users: Arc<RwLock<HashMap<String, User>>>,
     guest_sessions: Arc<RwLock<HashMap<String, GuestSession>>>,
+    presence: Arc<RwLock<HashMap<String, PresenceRecord>>>,
     login_failures: Arc<Mutex<LoginFailures>>,
 }
 
@@ -192,6 +207,7 @@ impl AuthService {
             sessions: Arc::new(RwLock::new(sessions)),
             users: Arc::new(RwLock::new(users)),
             guest_sessions: Arc::new(RwLock::new(HashMap::new())),
+            presence: Arc::new(RwLock::new(HashMap::new())),
             login_failures: Arc::new(Mutex::new(HashMap::new())),
         };
         auth.initialize_activity_log();
@@ -827,6 +843,12 @@ impl AuthService {
         let mut sessions = self.sessions.write().unwrap();
         sessions.retain(|_, session| session.username != revoked_name);
         self.write_sessions(&sessions);
+        drop(sessions);
+        // Revoked sessions must not keep counting as active either.
+        self.presence
+            .write()
+            .unwrap()
+            .retain(|_, entry| entry.guest || entry.username.as_deref() != Some(&revoked_name));
         Ok(())
     }
 
@@ -856,47 +878,45 @@ impl AuthService {
             Some(serde_json::json!({ "duration_seconds": duration })),
         );
         tracing::info!(username = %sanitize_for_log(&session.username), "User logged out");
+
+        // "Active" ends with the live session: drop the tracker entry so the
+        // admin list stops reporting this browser right away instead of
+        // lingering until the presence timeout.
+        if let Some(ip) = session.ip.as_deref() {
+            self.presence
+                .write()
+                .unwrap()
+                .remove(&format!("user:{}@{ip}", session.username));
+        }
     }
 
     pub fn admin_stats(&self) -> AdminStatsResponse {
         let now = Utc::now();
+        let timeout = chrono::Duration::minutes(ACTIVE_PRESENCE_TIMEOUT_MINUTES);
+        let mut presence = self.presence.write().unwrap();
+        presence.retain(|_, entry| entry.last_seen + timeout > now);
         let mut active_users = Vec::new();
-        for session in self.sessions.read().unwrap().values().cloned() {
-            if session.expires_at <= now
-                || !session.last_seen.is_some_and(|last_seen| {
-                    last_seen + chrono::Duration::minutes(ACTIVE_PRESENCE_TIMEOUT_MINUTES) > now
-                })
-            {
-                continue;
-            }
-            active_users.push(ActivePresence {
-                username: Some(session.username.clone()),
-                guest: false,
-                station: session.current_station.clone(),
-                ip: session.ip.clone().unwrap_or_else(|| "unknown".to_string()),
-                active_seconds: (now - session.started_at).num_seconds().max(0) as u64,
-                started_at: session.started_at.to_rfc3339(),
-            });
-        }
-        active_users.sort_by(|left, right| left.username.cmp(&right.username));
-
         let mut guests = Vec::new();
-        let mut guest_sessions = self.guest_sessions.write().unwrap();
-        guest_sessions.retain(|_, session| {
-            session.last_seen
-                + chrono::Duration::minutes(ACTIVE_PRESENCE_TIMEOUT_MINUTES)
-                > now
-        });
-        for session in guest_sessions.values().cloned() {
-            guests.push(ActivePresence {
-                username: None,
-                guest: true,
-                station: session.current_station,
-                ip: session.ip,
-                active_seconds: (now - session.started_at).num_seconds().max(0) as u64,
-                started_at: session.started_at.to_rfc3339(),
-            });
+        for entry in presence.values() {
+            let snapshot = ActivePresence {
+                username: entry.username.clone(),
+                guest: entry.guest,
+                station: entry.station.clone(),
+                ip: entry.ip.clone(),
+                active_seconds: (now - entry.started_at).num_seconds().max(0) as u64,
+                started_at: entry.started_at.to_rfc3339(),
+            };
+            if snapshot.guest {
+                guests.push(snapshot);
+            } else {
+                active_users.push(snapshot);
+            }
         }
+        active_users.sort_by(|left, right| {
+            left.username
+                .cmp(&right.username)
+                .then_with(|| left.ip.cmp(&right.ip))
+        });
         guests.sort_by(|left, right| left.ip.cmp(&right.ip));
 
         AdminStatsResponse {
@@ -905,6 +925,43 @@ impl AuthService {
             active_users,
             guests,
         }
+    }
+
+    /// Refresh the in-memory presence of a client that just sent a page
+    /// heartbeat. The `started_at` timer only survives while heartbeats keep
+    /// arriving: after [`ACTIVE_PRESENCE_TIMEOUT_MINUTES`] of silence the
+    /// entry is dropped, so the next heartbeat starts a fresh timer and a
+    /// closed browser tab never keeps inflating "active" time.
+    fn record_presence(
+        &self,
+        username: Option<&str>,
+        guest: bool,
+        ip: &str,
+        station: Option<&str>,
+        now: chrono::DateTime<Utc>,
+    ) {
+        let timeout = chrono::Duration::minutes(ACTIVE_PRESENCE_TIMEOUT_MINUTES);
+        let mut presence = self.presence.write().unwrap();
+        presence.retain(|_, entry| entry.last_seen + timeout > now);
+        // One record per identity + IP keeps parallel tabs/requests from
+        // multiplying the session timer.
+        presence
+            .entry(match username.filter(|_| !guest) {
+                Some(name) => format!("user:{name}@{ip}"),
+                None => format!("guest:{ip}"),
+            })
+            .and_modify(|entry| {
+                entry.last_seen = now;
+                entry.station = station.map(str::to_owned);
+            })
+            .or_insert_with(|| PresenceRecord {
+                username: username.filter(|_| !guest).map(str::to_owned),
+                guest,
+                ip: ip.to_string(),
+                station: station.map(str::to_owned),
+                started_at: now,
+                last_seen: now,
+            });
     }
 
     pub fn ensure_guest_session(
@@ -930,6 +987,13 @@ impl AuthService {
         };
 
         let mut guest_sessions = self.guest_sessions.write().unwrap();
+        // Admin stats are fed by the presence tracker now; prune here so this
+        // bookkeeping (cookie issuance, guest log lines) stays bounded.
+        guest_sessions.retain(|_, entry| {
+            entry.last_seen
+                + chrono::Duration::minutes(ACTIVE_PRESENCE_TIMEOUT_MINUTES)
+                > now
+        });
         match guest_sessions.entry(guest_id.clone()) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(entry);
@@ -1043,7 +1107,11 @@ impl AuthService {
         Self::no_store(response)
     }
 
-    pub fn heartbeat_response(&self, headers: HeaderMap, Json(payload): Json<HeartbeatRequest>) -> Response {
+    pub fn heartbeat_response(
+        &self,
+        headers: HeaderMap,
+        Json(payload): Json<HeartbeatRequest>,
+    ) -> Response {
         let now = Utc::now();
         let station_name = payload.station.as_deref().filter(|s| !s.trim().is_empty());
 
@@ -1064,6 +1132,18 @@ impl AuthService {
                 session.current_station = station_name.map(str::to_owned);
             }
             self.write_sessions(&sessions);
+            drop(sessions);
+            // A page heartbeat marks this browser as present; the activity
+            // timer only lives while heartbeats keep arriving.
+            if self.stats_enabled {
+                self.record_presence(
+                    Some(&user.username),
+                    false,
+                    &Self::real_ip(&headers),
+                    station_name,
+                    now,
+                );
+            }
             let response = (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
             return Self::no_store(response);
         }
@@ -1075,6 +1155,7 @@ impl AuthService {
         let Some((guest_id, _)) = self.ensure_guest_session(&headers, station_name) else {
             return (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
         };
+        self.record_presence(None, true, &Self::real_ip(&headers), station_name, now);
 
         let response = (StatusCode::OK, Json(serde_json::json!({ "ok": true, "guest_id": guest_id }))).into_response();
         let mut response = Self::no_store(response);
@@ -1423,23 +1504,127 @@ mod tests {
     }
 
     #[test]
-    fn admin_stats_only_includes_recently_seen_users() {
+    fn admin_stats_only_counts_users_that_sent_a_page_heartbeat() {
         let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let auth = AuthService::new(&temp_dir);
+        let mut auth = AuthService::new(&temp_dir);
+        auth.stats_enabled = true;
         auth.ensure_default_admin("admin", "secret");
         let (_, session_id) = auth.login("admin", "secret").unwrap();
 
-        assert_eq!(auth.admin_stats().active_users.len(), 1);
-        auth.sessions
-            .write()
-            .unwrap()
-            .get_mut(&session_id)
-            .unwrap()
-            .last_seen = Some(Utc::now() - chrono::Duration::minutes(4));
+        // Signing in alone is not enough: the activity timer starts with a
+        // page-load heartbeat, so other API traffic stays invisible.
         assert!(auth.admin_stats().active_users.is_empty());
 
-        assert!(auth.current_user_from_session(&session_id).is_some());
-        assert_eq!(auth.admin_stats().active_users.len(), 1);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            HeaderValue::from_str(&format!("session_id={session_id}")).expect("valid cookie"),
+        );
+        let payload = Json(HeartbeatRequest {
+            station: Some("Radio Nova".to_string()),
+        });
+        assert_eq!(
+            auth.heartbeat_response(headers.clone(), payload)
+                .status(),
+            StatusCode::OK
+        );
+
+        let stats = auth.admin_stats();
+        assert_eq!(stats.active_users.len(), 1);
+        let active = &stats.active_users[0];
+        assert_eq!(active.username.as_deref(), Some("admin"));
+        assert_eq!(active.station.as_deref(), Some("Radio Nova"));
+        assert!(!active.guest);
+        assert_eq!(active.active_seconds, 0);
+
+        // A stale tracker entry (no heartbeat for over the timeout window)
+        // disappears instead of reporting made-up activity time.
+        assert_eq!(auth.presence.read().unwrap().len(), 1);
+        auth.presence
+            .write()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap()
+            .last_seen = Utc::now() - chrono::Duration::minutes(6);
+        assert!(auth.admin_stats().active_users.is_empty());
+
+        // The next heartbeat after the silence starts a fresh timer.
+        let payload = Json(HeartbeatRequest { station: None });
+        assert_eq!(
+            auth.heartbeat_response(headers.clone(), payload)
+                .status(),
+            StatusCode::OK
+        );
+        let stats = auth.admin_stats();
+        assert_eq!(stats.active_users.len(), 1);
+        assert_eq!(stats.active_users[0].active_seconds, 0);
+        assert_eq!(stats.active_users[0].station, None);
+
+        // Logging out drops the entry immediately.
+        auth.logout(&session_id);
+        assert!(auth.admin_stats().active_users.is_empty());
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn guest_activity_tracks_one_timer_per_ip() {
+        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
+        let mut auth = AuthService::new(&temp_dir);
+        auth.stats_enabled = true;
+
+        // No guests have loaded the page yet.
+        assert!(auth.admin_stats().guests.is_empty());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
+        let payload = Json(HeartbeatRequest {
+            station: Some("Jazz FM".to_string()),
+        });
+        assert_eq!(
+            auth.heartbeat_response(headers.clone(), payload)
+                .status(),
+            StatusCode::OK
+        );
+
+        let stats = auth.admin_stats();
+        assert_eq!(stats.guests.len(), 1);
+        let guest = &stats.guests[0];
+        assert!(guest.guest);
+        assert_eq!(guest.username, None);
+        assert_eq!(guest.ip, "203.0.113.7");
+        assert_eq!(guest.station.as_deref(), Some("Jazz FM"));
+        assert_eq!(guest.active_seconds, 0);
+
+        // A second guest browser on the same IP joins the same per-IP timer
+        // instead of creating a duplicate row.
+        let mut headers_same_ip = HeaderMap::new();
+        headers_same_ip.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.7"),
+        );
+        let payload = Json(HeartbeatRequest { station: None });
+        auth.heartbeat_response(headers_same_ip, payload);
+        assert_eq!(auth.admin_stats().guests.len(), 1);
+
+        // Idling past the timeout prunes the entry and resets the timer for
+        // the next heartbeat.
+        assert_eq!(auth.presence.read().unwrap().len(), 1);
+        auth.presence
+            .write()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap()
+            .last_seen = Utc::now() - chrono::Duration::minutes(6);
+        assert!(auth.admin_stats().guests.is_empty());
+
+        let payload = Json(HeartbeatRequest { station: None });
+        auth.heartbeat_response(headers.clone(), payload);
+        let stats = auth.admin_stats();
+        assert_eq!(stats.guests.len(), 1);
+        assert_eq!(stats.guests[0].active_seconds, 0);
 
         let _ = fs::remove_dir_all(temp_dir);
     }

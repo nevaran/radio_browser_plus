@@ -1181,6 +1181,40 @@ a:focus-visible,
   flex: 1;
 }
 
+/* Share window: read-only deep link with a copy action. The link stays a
+   single scrollable line; selecting it on focus covers manual copying. */
+.share-link-input {
+  width: 100%;
+  background: rgba(5, 8, 16, 0.72);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  padding: 0.75rem 0.9rem;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.35);
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+  cursor: text;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  margin-bottom: 1.15rem;
+}
+
+.share-link-input:focus {
+  outline: none;
+  border-color: var(--accent-ring);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.35),
+    0 0 0 3px rgba(251, 191, 36, 0.16);
+}
+
+.share-error {
+  color: #f87171;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin: 0.8rem 0 0;
+}
+
 .secondary-button {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2053,6 +2087,39 @@ a:focus-visible,
   color: var(--muted);
 }
 
+.share-current {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-spring),
+    border-color var(--dur-fast) ease, background var(--dur-fast) ease,
+    color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), var(--shadow-sm);
+}
+
+.share-current .share-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.share-current:hover {
+  transform: scale(1.07);
+  border-color: var(--surface-hover);
+  color: var(--text);
+}
+
+.share-current:active {
+  transform: scale(1);
+}
+
 .volume-control {
   display: flex;
   align-items: center;
@@ -2346,6 +2413,16 @@ a:focus-visible,
     height: 19px;
   }
 
+  .share-current {
+    width: 42px;
+    height: 42px;
+  }
+
+  .share-current .share-icon {
+    width: 19px;
+    height: 19px;
+  }
+
   .play-stop-container {
     width: 46px;
     height: 42px;
@@ -2564,6 +2641,17 @@ a:focus-visible,
 }
 
 .now-playing-bar.compact .favorite-current .heart-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.now-playing-bar.compact .share-current {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+
+.now-playing-bar.compact .share-current .share-icon {
   width: 16px;
   height: 16px;
 }

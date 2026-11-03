@@ -107,6 +107,9 @@ pub fn LoginModal() -> impl IntoView {
                                                     s.login_open.set(false);
                                                     s.ensure_favorites().await;
                                                     s.load_view();
+                                                    // A share link that arrived before
+                                                    // sign-in loads its station now.
+                                                    s.load_pending_shared_station();
                                                 }
                                                 Ok(_) => s.show_alert(
                                                     "Sign in",

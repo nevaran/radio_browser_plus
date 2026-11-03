@@ -6,7 +6,7 @@ use wasm_bindgen::{closure::Closure, JsCast};
 
 use crate::components::{
     ActiveSessionsModal, ChangePasswordModal, CollectionGrid, CreateUserModal, Dialog, LoginModal,
-    NowPlaying, Sidebar, StationGrid,
+    NowPlaying, ShareModal, Sidebar, StationGrid,
 };
 use crate::state::{AppState, STATION_REFRESH_MS};
 use crate::utils::{format_count, SortMode};
@@ -188,6 +188,7 @@ pub fn App() -> impl IntoView {
         <LoginModal />
         <CreateUserModal />
         <ChangePasswordModal />
+        <ShareModal />
         <Dialog />
     }
 }
@@ -219,6 +220,9 @@ fn init_app(state: AppState) {
                     }
                     state.ensure_favorites().await;
                     state.load_view();
+                    // A share link opened before the session was known loads
+                    // once the session is confirmed here.
+                    state.load_pending_shared_station();
                 }
                 // A login submitted while the restore was in flight wins:
                 // never wipe an established session with a stale failure.
@@ -229,6 +233,8 @@ fn init_app(state: AppState) {
                     state.handle_unauthorized();
                     if state.allow_guest.get_untracked() {
                         state.load_view();
+                        // Same retry, now that guest browsing is confirmed.
+                        state.load_pending_shared_station();
                     }
                 }
             }

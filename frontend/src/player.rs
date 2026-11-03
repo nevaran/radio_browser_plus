@@ -155,6 +155,34 @@ impl Player {
         }
     }
 
+    /// Load a station into the player controls without starting playback.
+    pub fn load_station(&self, station: Station) {
+        let Some(stream) = station_stream_url(&station) else {
+            return;
+        };
+        let Ok(audio) = HtmlAudioElement::new_with_src(&stream) else {
+            return;
+        };
+
+        self.cancel_retry();
+        self.disarm_stall_watchdog();
+        self.teardown_previous();
+        if let Some(current) = self.audio.lock().unwrap().take() {
+            Self::silence(&current);
+        }
+        audio.set_volume(if self.muted.get_untracked() {
+            0.0
+        } else {
+            self.volume.get_untracked()
+        });
+        self.attach_handlers(&audio);
+        *self.audio.lock().unwrap() = Some(audio);
+        self.current.set(Some(station));
+        self.wants_playing.set(false);
+        self.is_playing.set(false);
+        self.loading.set(false);
+    }
+
     pub fn play(&self, station: Station) {
         self.cancel_retry();
         // Fresh baseline; the watchdog arms below and cancels itself on flow.
@@ -244,8 +272,10 @@ impl Player {
 
         let this = self.clone();
         let on_waiting = Closure::wrap(Box::new(move || {
-            this.loading.set(true);
-            this.arm_stall_watchdog();
+            if this.wants_playing.get_untracked() {
+                this.loading.set(true);
+                this.arm_stall_watchdog();
+            }
         }) as Box<dyn Fn()>);
         audio.set_onwaiting(Some(on_waiting.as_ref().unchecked_ref()));
         on_waiting.forget();

@@ -12,8 +12,8 @@ use wasm_bindgen::JsCast;
 
 use crate::api;
 use crate::models::{
-    favorite_to_station, station_id, AdminStats, CollectionItem, Country, Favorite, Language,
-    Station, Tag, User,
+    favorite_to_station, station_id, station_stream_url, AdminStats, CollectionItem, Country,
+    Favorite, Language, Station, Tag, User,
 };
 use crate::player::Player;
 use crate::utils::{
@@ -106,6 +106,13 @@ pub struct AppState {
     /// True when the server allows anonymous browsing (`ALLOW_GUEST_ACCESS`).
     /// Fetched once at startup from the public `/api/config`.
     pub allow_guest: RwSignal<bool>,
+    /// Pending `#station/<id>` share-link target. Stashed by [`Self::apply_hash`]
+    /// before the session is known; a rejected fetch while logged out keeps it
+    /// so the post-sign-in retry can load the shared station.
+    pub shared_station: RwSignal<Option<String>>,
+    /// Open share window and the link it shows (`None` = closed). Opened by
+    /// [`Self::share_station`]; the window owns the copy-to-clipboard action.
+    pub share_open: RwSignal<Option<String>>,
     /// Currently open in-app dialog, if any (replaces `alert`/`confirm`).
     pub dialog: RwSignal<Option<AppDialog>>,
     pub player: Player,
@@ -148,6 +155,8 @@ impl AppState {
             admin_stats_open: RwSignal::new(false),
             session_checked: RwSignal::new(false),
             allow_guest: RwSignal::new(false),
+            shared_station: RwSignal::new(None),
+            share_open: RwSignal::new(None),
             dialog: RwSignal::new(None),
             player,
             login_open: RwSignal::new(false),
@@ -675,6 +684,28 @@ impl AppState {
             self.load_view();
             return;
         }
+        // Share deep link `#station/<id>`: stash the target and clear the hash
+        // right away, so the hashchange this triggers restores the saved view.
+        // Keep accepting `#play/<id>` for links created by older versions.
+        {
+            let (view_raw, rest) = hash.split_once('/').unwrap_or((hash, ""));
+            let id = if view_raw.eq_ignore_ascii_case("station")
+                || view_raw.eq_ignore_ascii_case("play")
+            {
+                let id = percent_decode(rest);
+                (!id.is_empty()).then_some(id)
+            } else {
+                None
+            };
+            if let Some(id) = id {
+                self.shared_station.set(Some(id));
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().set_hash("");
+                }
+                self.load_pending_shared_station();
+                return;
+            }
+        }
         let mut parts = hash.splitn(2, '/');
         let view = normalize_view_name(parts.next().unwrap_or(""));
         let mut filter = parts.next().map(percent_decode).filter(|f| !f.is_empty());
@@ -684,6 +715,78 @@ impl AppState {
         self.view.set(view);
         self.filter.set(filter);
         self.load_view();
+    }
+
+    // -- share deep links ---------------------------------------------------
+
+    /// Load the station referenced by a pending `#station/<id>` share link
+    /// without starting playback.
+    /// Sessions restore asynchronously, so when the fetch is rejected because
+    /// no session is published yet the intent stays stashed for a retry (from
+    /// the boot restore and the sign-in success path); any other failure is
+    /// consumed, surfaced with an alert.
+    pub fn load_pending_shared_station(&self) {
+        let Some(id) = self.shared_station.get_untracked() else {
+            return;
+        };
+        let state = self.clone();
+        leptos::task::spawn_local(async move {
+            // A racing attempt when the session turns out valid must not
+            // start the same link twice.
+            if state.shared_station.get_untracked().as_deref() != Some(id.as_str()) {
+                return;
+            }
+            match api::fetch_station_by_id(&id).await {
+                Ok(station) => {
+                    state.shared_station.set(None);
+                    if station_stream_url(&station).is_some() {
+                        // Deliberately not queued: a shared link loads one
+                        // station with empty prev/next, ready for the user to
+                        // start from the now-playing controls.
+                        state.player.load_station(station);
+                    } else {
+                        state.show_alert(
+                            "Station link",
+                            "That station no longer has a playable stream.",
+                        );
+                    }
+                }
+                // Session not established yet: keep the intent for the
+                // post-sign-in retry.
+                Err(error) if error == "unauthorized" => {}
+                Err(_) => {
+                    state.shared_station.set(None);
+                    state.show_alert("Station link", "That station is unavailable.");
+                }
+            }
+        });
+    }
+
+    /// Open the share window for the given station with its `#station/<id>`
+    /// deep link. The window (see [`crate::components::ShareModal`]) holds the
+    /// read-only link field and the copy-to-clipboard action.
+    pub fn share_station(&self, station: Station) {
+        let Some(id) = station_id(&station) else {
+            self.show_alert("Share station", "This station cannot be shared.");
+            return;
+        };
+        self.share_open.set(Some(self.share_url(&id)));
+    }
+
+    /// Absolute deep-link URL built from the current origin and path, so
+    /// reverse-proxied deployments stay shareable.
+    fn share_url(&self, id: &str) -> String {
+        let base = web_sys::window()
+            .map(|window| {
+                let location = window.location();
+                format!(
+                    "{}{}",
+                    location.origin().unwrap_or_default(),
+                    location.pathname().unwrap_or_default()
+                )
+            })
+            .unwrap_or_default();
+        format!("{base}#station/{}", percent_encode(id))
     }
 
     // -- data loading ------------------------------------------------------

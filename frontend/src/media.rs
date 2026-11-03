@@ -5,8 +5,12 @@
 //! bindings still require `--cfg=web_sys_unstable_apis`). Every helper is a
 //! silent no-op where the API is missing, so private-mode / old browsers
 //! simply get no lock-screen controls instead of an error.
+//!
+//! The share/clipboard helpers (`navigator.clipboard`, legacy
+//! `execCommand`) follow the same raw-Reflect, fail-silent style.
 
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
 
 use crate::models::Station;
 use crate::utils::{primary_image, station_genre, PLACEHOLDER_SVG};
@@ -150,4 +154,62 @@ pub fn init_media_handlers(
     let next = Closure::wrap(Box::new(move |_: JsValue| on_next()) as Box<dyn Fn(JsValue)>);
     set_handler(&session, "nexttrack", next.as_ref().unchecked_ref());
     next.forget();
+}
+
+// -- copy helpers -----------------------------------------------------------
+// Same fail-silent interop contract: every step degrades to `false` where the
+// browser lacks the API, and the share window decides the next fallback.
+
+/// Copy `text` via `navigator.clipboard.writeText` (HTTPS / localhost only):
+/// `true` when the browser confirmed the copy, `false` otherwise (missing
+/// API, denied permission, insecure context, old browser).
+pub async fn clipboard_write_text(text: &str) -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let navigator: JsValue = window.navigator().into();
+    let Ok(clipboard) = js_sys::Reflect::get(&navigator, &JsValue::from_str("clipboard")) else {
+        return false;
+    };
+    let Ok(write_text) = js_sys::Reflect::get(&clipboard, &JsValue::from_str("writeText")) else {
+        return false;
+    };
+    let Ok(write_text) = write_text.dyn_into::<js_sys::Function>() else {
+        return false;
+    };
+    let Ok(promise) = write_text.call1(&clipboard, &JsValue::from_str(text)) else {
+        return false;
+    };
+    let Ok(promise) = promise.dyn_into::<js_sys::Promise>() else {
+        return false;
+    };
+    JsFuture::from(promise).await.is_ok()
+}
+
+/// Legacy selection copy (`document.execCommand`), deprecated but still
+/// honored for user-gesture copies in plain-HTTP contexts where
+/// `navigator.clipboard` is unavailable. Copies whatever is selected — the
+/// share window selects its read-only link field before calling this.
+pub fn copy_selection() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let Some(document) = window.document() else {
+        return false;
+    };
+    // Raw interop on purpose: `execCommand` bindings need a web-sys feature
+    // beyond what this build enables, and the raw call degrades to `false`
+    // on engines that dropped the API.
+    let document: JsValue = document.into();
+    let Ok(exec_command) = js_sys::Reflect::get(&document, &JsValue::from_str("execCommand"))
+    else {
+        return false;
+    };
+    let Ok(exec_command) = exec_command.dyn_into::<js_sys::Function>() else {
+        return false;
+    };
+    let Ok(result) = exec_command.call1(&document, &JsValue::from_str("copy")) else {
+        return false;
+    };
+    result.is_truthy()
 }

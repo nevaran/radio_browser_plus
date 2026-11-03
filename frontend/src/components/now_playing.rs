@@ -73,6 +73,36 @@ pub fn NowPlaying() -> impl IntoView {
             >
                 <div class="now-playing-main-row">
                     <div class="now-playing-left">
+                            <button
+                                id="share-current"
+                                class="share-current"
+                                title="Share station link"
+                                aria-label="Share station link"
+                                on:click=move |_| {
+                                    store.with_value(|s| {
+                                        if let Some(station) = s.player.current.get_untracked() {
+                                            s.share_station(station);
+                                        }
+                                    });
+                                }
+                            >
+                                // iOS-style share mark: box with an upward arrow,
+                                // stroke-only to match the heart icon.
+                                <svg
+                                    class="share-icon"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="1.8"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                    aria-hidden="true"
+                                >
+                                    <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+                                    <path d="M16 6l-4-4-4 4" />
+                                    <path d="M12 2v13" />
+                                </svg>
+                            </button>
                         <Show when=move || user.with(|u| u.is_some())>
                         <button
                             id="favorite-current"

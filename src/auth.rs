@@ -229,6 +229,198 @@ impl PresenceTracker {
     }
 }
 
+/// Append-only login/session trail with retention-based pruning. Stays
+/// disabled until `LOG_RETENTION_DAYS` is set; files are created/updated with
+/// owner-only permissions.
+#[derive(Debug, Default)]
+struct ActivityLog {
+    path: PathBuf,
+    retention_days: u64,
+}
+
+impl ActivityLog {
+    fn new(path: PathBuf, retention_days: u64) -> Self {
+        Self {
+            path,
+            retention_days,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.retention_days > 0
+    }
+
+    fn open(&self) -> std::io::Result<fs::File> {
+        let mut options = fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let file = options.open(&self.path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(file)
+    }
+
+    fn initialize(&self) {
+        if !self.enabled() {
+            return;
+        }
+
+        match self.open() {
+            Ok(_) => self.prune(),
+            Err(error) => tracing::error!(
+                path = %self.path.display(),
+                error = %error,
+                "Failed to initialize activity log"
+            ),
+        }
+    }
+
+    fn prune(&self) {
+        if !self.enabled() {
+            return;
+        }
+
+        let cutoff = Utc::now() - chrono::Duration::days(self.retention_days as i64);
+        let Ok(contents) = fs::read_to_string(&self.path) else {
+            return;
+        };
+
+        let filtered: Vec<String> = contents
+            .lines()
+            .filter_map(|line| {
+                if Self::timestamp(line).is_some_and(|timestamp| timestamp >= cutoff) {
+                    Some(line.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let payload = if filtered.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", filtered.join("\n"))
+        };
+        if payload != contents {
+            if let Err(error) = fs::write(&self.path, payload) {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "Failed to prune activity log"
+                );
+            }
+        }
+    }
+
+    /// Parse an entry timestamp, accepting the text format this log writes
+    /// (`[rfc3339]`) and the legacy JSON format possibly left behind by an
+    /// older build.
+    fn timestamp(line: &str) -> Option<chrono::DateTime<Utc>> {
+        if let Some(timestamp) = line
+            .strip_prefix('[')
+            .and_then(|line| line.split_once(']'))
+            .map(|(timestamp, _)| timestamp)
+        {
+            return chrono::DateTime::parse_from_rfc3339(timestamp)
+                .ok()
+                .map(|timestamp| timestamp.with_timezone(&Utc));
+        }
+
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        let timestamp = entry.get("ts")?.as_str()?;
+        chrono::DateTime::parse_from_rfc3339(timestamp)
+            .ok()
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+    }
+
+    /// Append one event line. The retention pruning runs after every write,
+    /// which keeps a leaked/growing log within its configured window.
+    fn record(
+        &self,
+        event: &str,
+        username: Option<&str>,
+        ip: Option<&str>,
+        station: Option<&str>,
+        details: Option<serde_json::Value>,
+    ) {
+        if !self.enabled() {
+            return;
+        }
+
+        let event_label = match event {
+            "session_start" => "Session started",
+            "session_end" => "Session ended",
+            "station_started" => "Station started",
+            "guest_session_start" => "Guest session started",
+            "user_created" => "User created",
+            "password_changed" => "Password changed",
+            _ => event,
+        };
+        let mut fields = vec![
+            format!(
+                "[{}]",
+                Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            ),
+            event_label.to_string(),
+        ];
+        if let Some(username) = username {
+            fields.push(format!("User: {}", sanitize_for_log(username)));
+        }
+        if let Some(ip) = ip {
+            fields.push(format!("IP: {}", sanitize_for_log(ip)));
+        }
+        if let Some(station) = station {
+            fields.push(format!("Station: {}", sanitize_for_log(station)));
+        }
+        if let Some(details) = details.and_then(|details| details.as_object().cloned()) {
+            for (key, value) in details {
+                if key == "session_id" || value.is_null() {
+                    continue;
+                }
+                let value = value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string());
+                fields.push(format!(
+                    "{}: {}",
+                    key.replace('_', " "),
+                    sanitize_for_log(&value)
+                ));
+            }
+        }
+        let entry = fields.join(" | ");
+
+        let mut file = match self.open() {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::error!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "Failed to open activity log"
+                );
+                return;
+            }
+        };
+        if let Err(error) = writeln!(file, "{entry}") {
+            tracing::error!(
+                path = %self.path.display(),
+                error = %error,
+                "Failed to write activity log entry"
+            );
+            return;
+        }
+        self.prune();
+    }
+}
+
 /// Username allowlist: normalized usernames must match this. It keeps
 /// per-user file paths (`user-<name>/...`) free of traversal sequences.
 pub const MAX_USERNAME_LEN: usize = 64;
@@ -259,13 +451,12 @@ pub struct AuthService {
     root_dir: PathBuf,
     users_path: PathBuf,
     sessions_path: PathBuf,
-    activity_log_path: PathBuf,
     stats_enabled: bool,
-    log_retention_days: u64,
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     users: Arc<RwLock<HashMap<String, User>>>,
     guest_sessions: Arc<RwLock<HashMap<String, GuestSession>>>,
     presence: PresenceTracker,
+    activity_log: ActivityLog,
     login_failures: Arc<Mutex<LoginFailures>>,
 }
 
@@ -274,7 +465,6 @@ impl AuthService {
         let root_dir = root_dir.into();
         let users_path = root_dir.join("users.json");
         let sessions_path = root_dir.join("sessions.json");
-        let activity_log_path = root_dir.join("activity.log");
         let users = match fs::read_to_string(&users_path) {
             Ok(contents) => {
                 serde_json::from_str::<HashMap<String, User>>(&contents).unwrap_or_default()
@@ -296,6 +486,7 @@ impl AuthService {
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
             .unwrap_or(0);
+        let activity_log = ActivityLog::new(root_dir.join("activity.log"), log_retention_days);
 
         if let Some(parent) = users_path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -305,16 +496,15 @@ impl AuthService {
             root_dir,
             users_path,
             sessions_path,
-            activity_log_path,
             stats_enabled,
-            log_retention_days,
             sessions: Arc::new(RwLock::new(sessions)),
             users: Arc::new(RwLock::new(users)),
             guest_sessions: Arc::new(RwLock::new(HashMap::new())),
             presence: PresenceTracker::default(),
+            activity_log,
             login_failures: Arc::new(Mutex::new(HashMap::new())),
         };
-        auth.initialize_activity_log();
+        auth.activity_log.initialize();
         auth
     }
 
@@ -367,178 +557,6 @@ impl AuthService {
         let payload =
             serde_json::to_string_pretty(sessions).expect("sessions payload is serializable");
         Self::write_json_file(&self.sessions_path, &payload);
-    }
-
-    fn activity_log_enabled(&self) -> bool {
-        self.log_retention_days > 0
-    }
-
-    fn open_activity_log(&self) -> std::io::Result<fs::File> {
-        let mut options = fs::OpenOptions::new();
-        options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-
-        let file = options.open(&self.activity_log_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                &self.activity_log_path,
-                fs::Permissions::from_mode(0o600),
-            )?;
-        }
-        Ok(file)
-    }
-
-    fn initialize_activity_log(&self) {
-        if !self.activity_log_enabled() {
-            return;
-        }
-
-        match self.open_activity_log() {
-            Ok(_) => self.prune_activity_log(),
-            Err(error) => tracing::error!(
-                path = %self.activity_log_path.display(),
-                error = %error,
-                "Failed to initialize activity log"
-            ),
-        }
-    }
-
-    fn prune_activity_log(&self) {
-        if !self.activity_log_enabled() {
-            return;
-        }
-
-        let cutoff = Utc::now() - chrono::Duration::days(self.log_retention_days as i64);
-        let Ok(contents) = fs::read_to_string(&self.activity_log_path) else {
-            return;
-        };
-
-        let filtered: Vec<String> = contents
-            .lines()
-            .filter_map(|line| {
-                if Self::activity_log_timestamp(line).is_some_and(|timestamp| timestamp >= cutoff) {
-                    Some(line.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let payload = if filtered.is_empty() {
-            String::new()
-        } else {
-            format!("{}\n", filtered.join("\n"))
-        };
-        if payload != contents {
-            if let Err(error) = fs::write(&self.activity_log_path, payload) {
-                tracing::warn!(
-                    path = %self.activity_log_path.display(),
-                    error = %error,
-                    "Failed to prune activity log"
-                );
-            }
-        }
-    }
-
-    fn activity_log_timestamp(line: &str) -> Option<chrono::DateTime<Utc>> {
-        if let Some(timestamp) = line
-            .strip_prefix('[')
-            .and_then(|line| line.split_once(']'))
-            .map(|(timestamp, _)| timestamp)
-        {
-            return chrono::DateTime::parse_from_rfc3339(timestamp)
-                .ok()
-                .map(|timestamp| timestamp.with_timezone(&Utc));
-        }
-
-        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
-        let timestamp = entry.get("ts")?.as_str()?;
-        chrono::DateTime::parse_from_rfc3339(timestamp)
-            .ok()
-            .map(|timestamp| timestamp.with_timezone(&Utc))
-    }
-
-    fn log_activity(
-        &self,
-        event: &str,
-        username: Option<&str>,
-        ip: Option<&str>,
-        station: Option<&str>,
-        details: Option<serde_json::Value>,
-    ) {
-        if !self.activity_log_enabled() {
-            return;
-        }
-
-        let event_label = match event {
-            "session_start" => "Session started",
-            "session_end" => "Session ended",
-            "station_started" => "Station started",
-            "guest_session_start" => "Guest session started",
-            "user_created" => "User created",
-            "password_changed" => "Password changed",
-            _ => event,
-        };
-        let mut fields = vec![
-            format!(
-                "[{}]",
-                Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-            ),
-            event_label.to_string(),
-        ];
-        if let Some(username) = username {
-            fields.push(format!("User: {}", sanitize_for_log(username)));
-        }
-        if let Some(ip) = ip {
-            fields.push(format!("IP: {}", sanitize_for_log(ip)));
-        }
-        if let Some(station) = station {
-            fields.push(format!("Station: {}", sanitize_for_log(station)));
-        }
-        if let Some(details) = details.and_then(|details| details.as_object().cloned()) {
-            for (key, value) in details {
-                if key == "session_id" || value.is_null() {
-                    continue;
-                }
-                let value = value
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| value.to_string());
-                fields.push(format!(
-                    "{}: {}",
-                    key.replace('_', " "),
-                    sanitize_for_log(&value)
-                ));
-            }
-        }
-        let entry = fields.join(" | ");
-
-        let mut file = match self.open_activity_log() {
-            Ok(file) => file,
-            Err(error) => {
-                tracing::error!(
-                    path = %self.activity_log_path.display(),
-                    error = %error,
-                    "Failed to open activity log"
-                );
-                return;
-            }
-        };
-        if let Err(error) = writeln!(file, "{entry}") {
-            tracing::error!(
-                path = %self.activity_log_path.display(),
-                error = %error,
-                "Failed to write activity log entry"
-            );
-            return;
-        }
-        self.prune_activity_log();
     }
 
     fn normalize_username(username: &str) -> String {
@@ -805,7 +823,7 @@ impl AuthService {
             },
         );
         self.write_sessions(&sessions);
-        self.log_activity(
+        self.activity_log.record(
             "session_start",
             Some(&normalized),
             Some(&ip),
@@ -841,7 +859,7 @@ impl AuthService {
         if session.expires_at <= now {
             sessions.remove(session_id);
             self.write_sessions(&sessions);
-            self.log_activity(
+            self.activity_log.record(
                 "session_end",
                 Some(&session.username),
                 session.ip.as_deref(),
@@ -889,7 +907,7 @@ impl AuthService {
         };
 
         let user = self.create_user_internal(username, password, user_role, false)?;
-        self.log_activity(
+        self.activity_log.record(
             "user_created",
             Some(&user.username),
             None,
@@ -941,7 +959,7 @@ impl AuthService {
             hash(trimmed_new, DEFAULT_COST).map_err(|_| "Failed to hash password".to_string())?;
         user.password_hash = new_hash;
         self.write_users(&users);
-        self.log_activity(
+        self.activity_log.record(
             "password_changed",
             Some(&normalized),
             None,
@@ -984,7 +1002,7 @@ impl AuthService {
         };
         self.write_sessions(&sessions);
         let duration = (Utc::now() - session.started_at).num_seconds().max(0) as u64;
-        self.log_activity(
+        self.activity_log.record(
             "session_end",
             Some(&session.username),
             session.ip.as_deref(),
@@ -1045,12 +1063,11 @@ impl AuthService {
         // Admin stats are fed by the presence tracker now; prune here so this
         // bookkeeping (cookie issuance, guest log lines) stays bounded. The
         // window is the same silence timeout as presence.
-        guest_sessions
-            .retain(|_, entry| entry.last_seen + PresenceTracker::timeout() > now);
+        guest_sessions.retain(|_, entry| entry.last_seen + PresenceTracker::timeout() > now);
         match guest_sessions.entry(guest_id.clone()) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(entry);
-                self.log_activity(
+                self.activity_log.record(
                     "guest_session_start",
                     None,
                     Some(&ip),
@@ -1066,7 +1083,7 @@ impl AuthService {
                 }
                 if existing.current_station.as_deref() != station && station.is_some() {
                     existing.current_station = station.map(str::to_owned);
-                    self.log_activity(
+                    self.activity_log.record(
                         "station_started",
                         None,
                         Some(&ip),
@@ -1160,6 +1177,10 @@ impl AuthService {
         Self::no_store(response)
     }
 
+    /// A browser page heartbeat: renew the signed-in session (if any) and
+    /// create/refresh entry in the presence tracker. Presence is what admin
+    /// stats report, so only heartbeats — page loads and open tabs — ever
+    /// show up there.
     pub fn heartbeat_response(
         &self,
         headers: HeaderMap,
@@ -1169,34 +1190,8 @@ impl AuthService {
         let station_name = payload.station.as_deref().filter(|s| !s.trim().is_empty());
 
         if let Ok((session_id, user)) = self.session_with_user(&headers) {
-            let mut sessions = self.sessions.write().unwrap();
-            if let Some(session) = sessions.get_mut(&session_id) {
-                session.expires_at = now + chrono::Duration::days(365);
-                let previous_station = session.current_station.clone();
-                if station_name.is_some() && previous_station.as_deref() != station_name {
-                    self.log_activity(
-                        "station_started",
-                        Some(&user.username),
-                        session.ip.as_deref(),
-                        station_name,
-                        Some(serde_json::json!({ "session_id": session_id })),
-                    );
-                }
-                session.current_station = station_name.map(str::to_owned);
-            }
-            self.write_sessions(&sessions);
-            drop(sessions);
-            // A page heartbeat marks this browser as present; the activity
-            // timer only lives while heartbeats keep arriving.
-            if self.stats_enabled {
-                self.presence.record(
-                    Some(&user.username),
-                    false,
-                    &Self::real_ip(&headers),
-                    station_name,
-                    now,
-                );
-            }
+            self.renew_session_on_heartbeat(&session_id, &user.username, station_name, now);
+            self.track_heartbeat(&headers, Some(&user.username), station_name, now);
             let response = (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
             return Self::no_store(response);
         }
@@ -1208,9 +1203,7 @@ impl AuthService {
         let Some((guest_id, _)) = self.ensure_guest_session(&headers, station_name) else {
             return (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
         };
-        // Already past the stats-enabled gate above.
-        self.presence
-            .record(None, true, &Self::real_ip(&headers), station_name, now);
+        self.track_heartbeat(&headers, None, station_name, now);
 
         let response = (StatusCode::OK, Json(serde_json::json!({ "ok": true, "guest_id": guest_id }))).into_response();
         let mut response = Self::no_store(response);
@@ -1218,6 +1211,54 @@ impl AuthService {
             .headers_mut()
             .append(header::SET_COOKIE, Self::guest_cookie_header(&guest_id, &headers));
         response
+    }
+
+    /// Extend the signed-in session's rolling lifetime and keep the activity
+    /// trail aware of the currently playing station ("station_started" is
+    /// logged once per station change).
+    fn renew_session_on_heartbeat(
+        &self,
+        session_id: &str,
+        username: &str,
+        station_name: Option<&str>,
+        now: chrono::DateTime<Utc>,
+    ) {
+        let mut sessions = self.sessions.write().unwrap();
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.expires_at = now + chrono::Duration::days(365);
+            if station_name.is_some() && session.current_station.as_deref() != station_name {
+                self.activity_log.record(
+                    "station_started",
+                    Some(username),
+                    session.ip.as_deref(),
+                    station_name,
+                    Some(serde_json::json!({ "session_id": session_id })),
+                );
+            }
+            session.current_station = station_name.map(str::to_owned);
+        }
+        self.write_sessions(&sessions);
+    }
+
+    /// Create or refresh this browser's presence from a page heartbeat, if
+    /// stats tracking is on at all. A username-less heartbeat comes from a
+    /// guest and is keyed by IP alone.
+    fn track_heartbeat(
+        &self,
+        headers: &HeaderMap,
+        username: Option<&str>,
+        station: Option<&str>,
+        now: chrono::DateTime<Utc>,
+    ) {
+        if self.stats_enabled {
+            self.presence.record(
+                username,
+                username.is_none(),
+                &Self::real_ip(headers),
+                station,
+                now,
+            );
+        }
     }
 
     /// Resolve the acting user from request headers, or the failure message
@@ -1396,341 +1437,4 @@ impl AuthService {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn create_user_for_reader_is_allowed_for_admin() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let auth = AuthService::new(&temp_dir);
-        auth.ensure_default_admin("admin", "secret");
-
-        let admin = auth
-            .current_user_from_session(&auth.login("admin", "secret").unwrap().1)
-            .unwrap();
-
-        let created = auth
-            .create_user("reader01", "hello", "reader", &admin)
-            .unwrap();
-        assert_eq!(created.role, UserRole::Reader);
-        // favorites_path_for_user provisions the per-user directory; the
-        // favorites file itself is created on first write.
-        let fav_path = auth.favorites_path_for_user("reader01");
-        assert!(fav_path.parent().is_some_and(|dir| dir.exists()));
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn admin_required_for_user_creation() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let auth = AuthService::new(&temp_dir);
-        auth.ensure_default_admin("admin", "secret");
-
-        let reader_user = auth
-            .create_user_internal("reader", "pass", UserRole::Reader, false)
-            .unwrap();
-        let session = auth.login("reader", "pass").unwrap().1;
-        let actor = auth.current_user_from_session(&session).unwrap();
-
-        assert_ne!(actor.role, UserRole::Admin);
-        assert!(auth
-            .create_user("reader2", "pass", "reader", &reader_user)
-            .is_err());
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn user_can_change_their_own_password() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let auth = AuthService::new(&temp_dir);
-        auth.ensure_default_admin("admin", "secret");
-
-        auth.change_password_for_user("admin", "secret", "new-secret")
-            .unwrap();
-        assert!(auth.login("admin", "new-secret").is_ok());
-        assert!(auth.login("admin", "secret").is_err());
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn unsafe_usernames_are_rejected() {
-        for bad in [
-            "",
-            "   ",
-            "../evil",
-            "../../etc/x",
-            "user/name",
-            "user\\name",
-            "a".repeat(65).as_str(),
-            "user name",
-            "user@host",
-        ] {
-            assert!(
-                !is_valid_username(&bad.to_lowercase()),
-                "should reject {bad:?}"
-            );
-        }
-        for good in ["admin", "reader01", "user.name_1-2", "a"] {
-            assert!(is_valid_username(good), "should accept {good:?}");
-        }
-    }
-
-    #[test]
-    fn traversal_username_cannot_create_user() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let auth = AuthService::new(&temp_dir);
-        auth.ensure_default_admin("admin", "secret");
-        let admin = auth
-            .current_user_from_session(&auth.login("admin", "secret").unwrap().1)
-            .unwrap();
-
-        assert!(auth
-            .create_user("../../evil", "pass", "reader", &admin)
-            .is_err());
-        assert!(auth.create_user("a/b", "pass", "reader", &admin).is_err());
-        // Nothing escaped the data directory.
-        let entries: Vec<_> = fs::read_dir(&temp_dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert!(!entries
-            .iter()
-            .any(|name| name.to_string_lossy().contains("evil")));
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn password_change_revokes_sessions() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let auth = AuthService::new(&temp_dir);
-        auth.ensure_default_admin("admin", "secret");
-
-        let (_, session_id) = auth.login("admin", "secret").unwrap();
-        assert!(auth.current_user_from_session(&session_id).is_some());
-
-        auth.change_password_for_user("admin", "secret", "brand-new")
-            .unwrap();
-        assert!(auth.current_user_from_session(&session_id).is_none());
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn insecure_local_http_sessions_are_accepted() {
-        let mut headers = HeaderMap::new();
-        headers.insert("cookie", HeaderValue::from_static("session_id=abc123"));
-        assert_eq!(AuthService::extract_session_id(&headers), Some("abc123".to_string()));
-    }
-
-    #[test]
-    fn secure_proxied_sessions_still_use_host_cookie() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        headers.insert(
-            "cookie",
-            HeaderValue::from_static("__Host-session_id=abc123"),
-        );
-        assert_eq!(AuthService::extract_session_id(&headers), Some("abc123".to_string()));
-    }
-
-    #[test]
-    fn me_uses_valid_session_when_stale_cookie_is_also_present() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let auth = AuthService::new(&temp_dir);
-        auth.ensure_default_admin("admin", "secret");
-        let (_, session_id) = auth.login("admin", "secret").unwrap();
-
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        headers.insert(
-            "cookie",
-            HeaderValue::from_str(&format!("__Host-session_id=stale; session_id={session_id}"))
-                .unwrap(),
-        );
-
-        let response = auth.me_response(headers);
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn admin_stats_only_counts_users_that_sent_a_page_heartbeat() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let mut auth = AuthService::new(&temp_dir);
-        auth.stats_enabled = true;
-        auth.ensure_default_admin("admin", "secret");
-        let (_, session_id) = auth.login("admin", "secret").unwrap();
-
-        // Signing in alone is not enough: the activity timer starts with a
-        // page-load heartbeat, so other API traffic stays invisible.
-        assert!(auth.admin_stats().active_users.is_empty());
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "cookie",
-            HeaderValue::from_str(&format!("session_id={session_id}")).expect("valid cookie"),
-        );
-        let payload = Json(HeartbeatRequest {
-            station: Some("Radio Nova".to_string()),
-        });
-        assert_eq!(
-            auth.heartbeat_response(headers.clone(), payload)
-                .status(),
-            StatusCode::OK
-        );
-
-        let stats = auth.admin_stats();
-        assert_eq!(stats.active_users.len(), 1);
-        let active = &stats.active_users[0];
-        assert_eq!(active.username.as_deref(), Some("admin"));
-        assert_eq!(active.station.as_deref(), Some("Radio Nova"));
-        assert!(!active.guest);
-        assert_eq!(active.active_seconds, 0);
-
-        // A stale tracker entry (no heartbeat for over the timeout window)
-        // disappears instead of reporting made-up activity time.
-        assert_eq!(auth.presence.entries.read().unwrap().len(), 1);
-        auth.presence
-            .entries
-            .write()
-            .unwrap()
-            .values_mut()
-            .next()
-            .unwrap()
-            .last_seen = Utc::now() - chrono::Duration::minutes(6);
-        assert!(auth.admin_stats().active_users.is_empty());
-
-        // The next heartbeat after the silence starts a fresh timer.
-        let payload = Json(HeartbeatRequest { station: None });
-        assert_eq!(
-            auth.heartbeat_response(headers.clone(), payload)
-                .status(),
-            StatusCode::OK
-        );
-        let stats = auth.admin_stats();
-        assert_eq!(stats.active_users.len(), 1);
-        assert_eq!(stats.active_users[0].active_seconds, 0);
-        assert_eq!(stats.active_users[0].station, None);
-
-        // Logging out drops the entry immediately.
-        auth.logout(&session_id);
-        assert!(auth.admin_stats().active_users.is_empty());
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn guest_activity_tracks_one_timer_per_ip() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let mut auth = AuthService::new(&temp_dir);
-        auth.stats_enabled = true;
-
-        // No guests have loaded the page yet.
-        assert!(auth.admin_stats().guests.is_empty());
-
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
-        let payload = Json(HeartbeatRequest {
-            station: Some("Jazz FM".to_string()),
-        });
-        assert_eq!(
-            auth.heartbeat_response(headers.clone(), payload)
-                .status(),
-            StatusCode::OK
-        );
-
-        let stats = auth.admin_stats();
-        assert_eq!(stats.guests.len(), 1);
-        let guest = &stats.guests[0];
-        assert!(guest.guest);
-        assert_eq!(guest.username, None);
-        assert_eq!(guest.ip, "203.0.113.7");
-        assert_eq!(guest.station.as_deref(), Some("Jazz FM"));
-        assert_eq!(guest.active_seconds, 0);
-
-        // A second guest browser on the same IP joins the same per-IP timer
-        // instead of creating a duplicate row.
-        let mut headers_same_ip = HeaderMap::new();
-        headers_same_ip.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.7"),
-        );
-        let payload = Json(HeartbeatRequest { station: None });
-        auth.heartbeat_response(headers_same_ip, payload);
-        assert_eq!(auth.admin_stats().guests.len(), 1);
-
-        // Idling past the timeout prunes the entry and resets the timer for
-        // the next heartbeat.
-        assert_eq!(auth.presence.entries.read().unwrap().len(), 1);
-        auth.presence
-            .entries
-            .write()
-            .unwrap()
-            .values_mut()
-            .next()
-            .unwrap()
-            .last_seen = Utc::now() - chrono::Duration::minutes(6);
-        assert!(auth.admin_stats().guests.is_empty());
-
-        let payload = Json(HeartbeatRequest { station: None });
-        auth.heartbeat_response(headers.clone(), payload);
-        let stats = auth.admin_stats();
-        assert_eq!(stats.guests.len(), 1);
-        assert_eq!(stats.guests[0].active_seconds, 0);
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn enabled_activity_log_is_created_and_receives_events() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let mut auth = AuthService::new(&temp_dir);
-        auth.log_retention_days = 1;
-
-        auth.initialize_activity_log();
-        assert!(auth.activity_log_path.exists());
-        auth.log_activity("session_start", Some("admin"), None, None, None);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&auth.activity_log_path)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777;
-            assert_eq!(mode, 0o600);
-        }
-
-        let contents = fs::read_to_string(&auth.activity_log_path).unwrap();
-        assert!(contents.contains("Session started | User: admin"));
-        assert!(!contents.trim_start().starts_with('{'));
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-
-    #[test]
-    fn session_remains_valid_after_service_restart() {
-        let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
-        let auth = AuthService::new(&temp_dir);
-        auth.ensure_default_admin("admin", "secret");
-
-        let (_, session_id) = auth.login("admin", "secret").unwrap();
-
-        let restarted = AuthService::new(&temp_dir);
-        assert_eq!(
-            restarted
-                .current_user_from_session(&session_id)
-                .unwrap()
-                .username,
-            "admin"
-        );
-
-        let _ = fs::remove_dir_all(temp_dir);
-    }
-}
+mod tests;

@@ -1,6 +1,6 @@
 // Main application entrypoint and HTTP routing setup
 use axum::{
-    extract::{Json, Path, Request, State},
+    extract::{Json, Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -23,10 +23,16 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use radio_browser_plus::{
-    auth::{
-        AuthService, ChangePasswordRequest, CreateUserRequest, HeartbeatRequest, LoginRequest,
+    auth::{AuthService, ChangePasswordRequest, CreateUserRequest, HeartbeatRequest, LoginRequest},
+    domain::{
+        Country, FavoritesResponse, HealthResponse, Language, Station, Tag, ToggleFavoriteRequest,
+        UpdateFavoriteRequest,
     },
-    features::{CollectionsHandlers, FavoritesHandlers, HealthHandlers, StationsHandlers},
+    error::Result,
+    features::{
+        stations::{PaginationParams, SearchParams, StationsQueryParams},
+        CollectionsHandlers, FavoritesHandlers, HealthHandlers, StationsHandlers,
+    },
     infra::RadioBrowserClient,
 };
 
@@ -50,8 +56,7 @@ async fn main() {
         );
     }
 
-    // Initialize infrastructure
-    let radio_client = RadioBrowserClient::new(None);
+    // Runtime configuration
     let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string());
     info!(data_dir = %data_dir, "Using data directory");
     let allow_guest = allow_guest_access();
@@ -68,6 +73,9 @@ async fn main() {
     if log_retention_days > 0 {
         tracing::info!(days = log_retention_days, "Activity logs retained for {} days", log_retention_days);
     }
+
+    // Initialize infrastructure
+    let radio_client = RadioBrowserClient::new(None);
     let auth = Arc::new(AuthService::new(&data_dir));
     auth.ensure_default_admin("admin", "admin");
     if auth.admin_uses_default_password("admin", "admin") {
@@ -84,187 +92,44 @@ async fn main() {
     let collections = Arc::new(CollectionsHandlers::new(radio_client));
     let health = Arc::new(HealthHandlers::new());
 
-    // Clones for router
-    let stations_1 = stations.clone();
-    let stations_2 = stations.clone();
-    let stations_3 = stations.clone();
-    let stations_4 = stations.clone();
+    let app = build_router(allow_guest, auth, stations, favorites, collections, health);
 
-    let favorites_1 = favorites.clone();
-    let favorites_2 = favorites.clone();
-    let favorites_3 = favorites.clone();
+    // Start server
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
+    let listener = TcpListener::bind(&addr).await.unwrap_or_else(|err| {
+        error!("Failed to bind to {}: {}", addr, err);
+        std::process::exit(1);
+    });
 
-    let collections_1 = collections.clone();
-    let collections_2 = collections.clone();
-    let collections_3 = collections.clone();
-    let collections_4 = collections.clone();
+    info!("Server listening on http://{}", addr);
 
-    let health_1 = health.clone();
+    axum::serve(listener, app).await.unwrap_or_else(|err| {
+        error!("Server error: {}", err);
+        std::process::exit(1);
+    });
+}
 
-    let auth_login = auth.clone();
-    let auth_logout = auth.clone();
-    let auth_me = auth.clone();
-    let auth_users = auth.clone();
-    let auth_change_password = auth.clone();
-    let auth_stats = auth.clone();
-    let auth_heartbeat = auth.clone();
-
-    // Build router
+/// Assemble the complete application: public health endpoint, the /api
+/// router (behind the auth middleware), hardened security layers, and the
+/// SPA fallback.
+fn build_router(
+    allow_guest: bool,
+    auth: Arc<AuthService>,
+    stations: Arc<StationsHandlers>,
+    favorites: Arc<FavoritesHandlers>,
+    collections: Arc<CollectionsHandlers>,
+    health: Arc<HealthHandlers>,
+) -> Router {
     let api = Router::new()
-        // Stations endpoints
-        .route(
-            "/api/stations",
-            get(move |params| {
-                let s = stations_1.clone();
-                async move {
-                    s.get_stations(params).await
-                }
-            }),
-        )
-        .route(
-            "/api/popular",
-            get(move |params| {
-                let s = stations_2.clone();
-                async move { s.list_popular(params).await }
-            }),
-        )
-        .route(
-            "/api/search",
-            get(move |params| {
-                let s = stations_3.clone();
-                async move { s.search(params).await }
-            }),
-        )
-        .route(
-            "/api/station/{id}",
-            get(move |Path(id)| {
-                let s = stations_4.clone();
-                async move { s.get_by_id(id).await }
-            }),
-        )
-        // Collections endpoints
-        .route(
-            "/api/countries",
-            get(move || {
-                let c = collections_1.clone();
-                async move { c.countries().await }
-            }),
-        )
-        .route(
-            "/api/languages",
-            get(move || {
-                let c = collections_2.clone();
-                async move { c.languages().await }
-            }),
-        )
-        .route(
-            "/api/tags",
-            get(move || {
-                let c = collections_3.clone();
-                async move { c.tags().await }
-            }),
-        )
-        .route(
-            "/api/genres",
-            get(move || {
-                let c = collections_4.clone();
-                async move { c.genres().await }
-            }),
-        )
-        // Auth endpoints
-        .route(
-            "/api/login",
-            post(move |headers: HeaderMap, payload: Json<LoginRequest>| {
-                let a = auth_login.clone();
-                async move { a.login_response(headers, payload) }
-            }),
-        )
-        .route(
-            "/api/logout",
-            post(move |headers: HeaderMap| {
-                let a = auth_logout.clone();
-                async move { a.logout_response(headers) }
-            }),
-        )
-        .route(
-            "/api/me",
-            get(move |headers: HeaderMap| {
-                let a = auth_me.clone();
-                async move { a.me_response(headers) }
-            }),
-        )
-        .route(
-            "/api/users",
-            post(move |headers: HeaderMap, payload: Json<CreateUserRequest>| {
-                let a = auth_users.clone();
-                async move { a.create_user_response(headers, payload) }
-            }),
-        )
-        .route(
-            "/api/change-password",
-            post(move |headers: HeaderMap, payload: Json<ChangePasswordRequest>| {
-                let a = auth_change_password.clone();
-                async move { a.change_password_response(headers, payload) }
-            }),
-        )
-        .route(
-            "/api/admin/stats",
-            get(move |headers: HeaderMap| {
-                let a = auth_stats.clone();
-                async move { a.admin_stats_response(headers) }
-            }),
-        )
-        .route(
-            "/api/heartbeat",
-            post(move |headers: HeaderMap, payload: Json<HeartbeatRequest>| {
-                let a = auth_heartbeat.clone();
-                async move { a.heartbeat_response(headers, payload) }
-            }),
-        )
-        // Favorites endpoints
-        .route(
-            "/api/favorites",
-            get(move |headers: HeaderMap| {
-                let f = favorites_1.clone();
-                async move { f.list(headers).await }
-            }),
-        )
-        .route(
-            "/api/favorites/toggle",
-            post(move |headers: HeaderMap, body: Json<radio_browser_plus::domain::ToggleFavoriteRequest>| {
-                let f = favorites_2.clone();
-                async move { f.toggle(headers, body).await }
-            }),
-        )
-        .route(
-            "/api/favorites/update",
-            post(move |headers: HeaderMap, body: Json<radio_browser_plus::domain::UpdateFavoriteRequest>| {
-                let f = favorites_3.clone();
-                async move { f.update(headers, body).await }
-            }),
-        )
-        // Public runtime config (guest mode flag) so the UI knows whether
-        // browsing without a session is allowed. Stays behind the auth
-        // layer like every /api route, but allowlisted inside it.
-        .route(
-            "/api/config",
-            get(move || {
-                let guest = allow_guest;
-                async move { Json(json!({ "allow_guest": guest })) }
-            }),
-        )
+        .merge(station_routes(stations))
+        .merge(collection_routes(collections))
+        .merge(auth_routes(auth.clone()))
+        .merge(favorite_routes(favorites))
+        .merge(config_routes(allow_guest))
         // Unknown API paths must not fall through to the SPA shell: answer
         // with JSON 404 so API clients (and scanners) get a clear signal.
         // (Also behind the auth layer below, like every other /api route.)
-        .route(
-            "/api/{*rest}",
-            any(|| async {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "error": "Not found" })),
-                )
-            }),
-        )
+        .route("/api/{*rest}", any(api_not_found))
         .route_layer(middleware::from_fn_with_state(
             ApiAuth {
                 auth: auth.clone(),
@@ -273,17 +138,10 @@ async fn main() {
             require_auth,
         ));
 
-    // Build router
-    let app = Router::new()
+    Router::new()
         // Health check stays public so reverse proxies and orchestrators can
         // probe liveness without credentials.
-        .route(
-            "/health",
-            get(move || {
-                let h = health_1.clone();
-                async move { h.check().await }
-            }),
-        )
+        .merge(health_routes(health))
         .merge(api)
         .fallback_service(ServeDir::new("dist").fallback(ServeFile::new("dist/index.html")))
         // Request hardening. Layers apply inside-out, so response headers are
@@ -316,21 +174,208 @@ async fn main() {
                  img-src 'self' data: https:; media-src http: https: data: blob:; \
                  connect-src 'self'; font-src 'self'; object-src 'none'",
             ),
-        ));
+        ))
+}
 
-    // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
-    let listener = TcpListener::bind(&addr).await.unwrap_or_else(|err| {
-        error!("Failed to bind to {}: {}", addr, err);
-        std::process::exit(1);
-    });
+// ---------------------------------------------------------------------------
+// Route wiring
+//
+// Every service lives behind an `Arc` and is passed as axum `State`, so
+// routes wire up one service each without the numbered `.clone()` plumbing
+// that per-route closures used to need.
+// ---------------------------------------------------------------------------
 
-    info!("Server listening on http://{}", addr);
+/// GET endpoints for stations (search/listings).
+fn station_routes(handlers: Arc<StationsHandlers>) -> Router {
+    Router::new()
+        .route("/api/stations", get(get_stations))
+        .route("/api/popular", get(list_popular))
+        .route("/api/search", get(search_stations))
+        .route("/api/station/{id}", get(get_station_by_id))
+        .with_state(handlers)
+}
 
-    axum::serve(listener, app).await.unwrap_or_else(|err| {
-        error!("Server error: {}", err);
-        std::process::exit(1);
-    });
+/// GET endpoints for the country/language/tag/genre collections.
+fn collection_routes(handlers: Arc<CollectionsHandlers>) -> Router {
+    Router::new()
+        .route("/api/countries", get(list_countries))
+        .route("/api/languages", get(list_languages))
+        .route("/api/tags", get(list_tags))
+        .route("/api/genres", get(list_genres))
+        .with_state(handlers)
+}
+
+/// Session and account endpoints (plus the admin activity stats feed).
+fn auth_routes(auth: Arc<AuthService>) -> Router {
+    Router::new()
+        .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
+        .route("/api/me", get(current_user))
+        .route("/api/users", post(create_user))
+        .route("/api/change-password", post(change_password))
+        .route("/api/admin/stats", get(admin_stats))
+        .route("/api/heartbeat", post(heartbeat))
+        .with_state(auth)
+}
+
+/// Per-user favorite CRUD endpoints.
+fn favorite_routes(handlers: Arc<FavoritesHandlers>) -> Router {
+    Router::new()
+        .route("/api/favorites", get(list_favorites))
+        .route("/api/favorites/toggle", post(toggle_favorite))
+        .route("/api/favorites/update", post(update_favorite))
+        .with_state(handlers)
+}
+
+/// Public runtime config (guest mode flag) so the UI knows whether
+/// browsing without a session is allowed. Stays behind the auth layer
+/// like every /api route, but allowlisted inside it.
+fn config_routes(allow_guest: bool) -> Router {
+    Router::new()
+        .route("/api/config", get(runtime_config))
+        .with_state(allow_guest)
+}
+
+/// Liveness endpoint, served outside the auth layer.
+fn health_routes(handlers: Arc<HealthHandlers>) -> Router {
+    Router::new().route("/health", get(health_check)).with_state(handlers)
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+//
+// Each wrapper announces its extractors (so axum's ordering rules are checked
+// in one obvious place) and delegates to the service method.
+// ---------------------------------------------------------------------------
+
+async fn get_stations(
+    State(s): State<Arc<StationsHandlers>>,
+    params: Query<StationsQueryParams>,
+) -> Result<Json<Vec<Station>>> {
+    s.get_stations(params).await
+}
+
+async fn list_popular(
+    State(s): State<Arc<StationsHandlers>>,
+    params: Query<PaginationParams>,
+) -> Result<Json<Vec<Station>>> {
+    s.list_popular(params).await
+}
+
+async fn search_stations(
+    State(s): State<Arc<StationsHandlers>>,
+    params: Query<SearchParams>,
+) -> Result<Json<Vec<Station>>> {
+    s.search(params).await
+}
+
+async fn get_station_by_id(
+    State(s): State<Arc<StationsHandlers>>,
+    Path(id): Path<String>,
+) -> Result<Json<Station>> {
+    s.get_by_id(id).await
+}
+
+async fn list_countries(
+    State(c): State<Arc<CollectionsHandlers>>,
+) -> Result<Json<Vec<Country>>> {
+    c.countries().await
+}
+
+async fn list_languages(
+    State(c): State<Arc<CollectionsHandlers>>,
+) -> Result<Json<Vec<Language>>> {
+    c.languages().await
+}
+
+async fn list_tags(State(c): State<Arc<CollectionsHandlers>>) -> Result<Json<Vec<Tag>>> {
+    c.tags().await
+}
+
+async fn list_genres(State(c): State<Arc<CollectionsHandlers>>) -> Result<Json<Vec<Tag>>> {
+    c.genres().await
+}
+
+async fn login(
+    State(a): State<Arc<AuthService>>,
+    headers: HeaderMap,
+    payload: Json<LoginRequest>,
+) -> Response {
+    a.login_response(headers, payload)
+}
+
+async fn logout(State(a): State<Arc<AuthService>>, headers: HeaderMap) -> Response {
+    a.logout_response(headers)
+}
+
+async fn current_user(State(a): State<Arc<AuthService>>, headers: HeaderMap) -> Response {
+    a.me_response(headers)
+}
+
+async fn create_user(
+    State(a): State<Arc<AuthService>>,
+    headers: HeaderMap,
+    payload: Json<CreateUserRequest>,
+) -> Response {
+    a.create_user_response(headers, payload)
+}
+
+async fn change_password(
+    State(a): State<Arc<AuthService>>,
+    headers: HeaderMap,
+    payload: Json<ChangePasswordRequest>,
+) -> Response {
+    a.change_password_response(headers, payload)
+}
+
+async fn admin_stats(State(a): State<Arc<AuthService>>, headers: HeaderMap) -> Response {
+    a.admin_stats_response(headers)
+}
+
+async fn heartbeat(
+    State(a): State<Arc<AuthService>>,
+    headers: HeaderMap,
+    payload: Json<HeartbeatRequest>,
+) -> Response {
+    a.heartbeat_response(headers, payload)
+}
+
+async fn list_favorites(
+    State(f): State<Arc<FavoritesHandlers>>,
+    headers: HeaderMap,
+) -> Result<Json<FavoritesResponse>> {
+    f.list(headers).await
+}
+
+async fn toggle_favorite(
+    State(f): State<Arc<FavoritesHandlers>>,
+    headers: HeaderMap,
+    body: Json<ToggleFavoriteRequest>,
+) -> Result<Json<FavoritesResponse>> {
+    f.toggle(headers, body).await
+}
+
+async fn update_favorite(
+    State(f): State<Arc<FavoritesHandlers>>,
+    headers: HeaderMap,
+    body: Json<UpdateFavoriteRequest>,
+) -> Result<Json<FavoritesResponse>> {
+    f.update(headers, body).await
+}
+
+async fn runtime_config(State(allow_guest): State<bool>) -> impl IntoResponse {
+    Json(json!({ "allow_guest": allow_guest }))
+}
+
+async fn health_check(State(h): State<Arc<HealthHandlers>>) -> Result<Json<HealthResponse>> {
+    h.check().await
+}
+
+async fn api_not_found() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "Not found" })),
+    )
 }
 
 // Whether anonymous browsing is allowed. Opt-in via ALLOW_GUEST_ACCESS=1
@@ -400,7 +445,8 @@ async fn require_auth(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_public_api_path, parse_admin_stats_flag, parse_guest_flag, parse_log_retention_days,
+        is_public_api_path, parse_admin_stats_flag,
+        parse_guest_flag, parse_log_retention_days,
     };
 
     #[test]

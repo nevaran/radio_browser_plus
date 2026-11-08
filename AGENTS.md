@@ -141,7 +141,7 @@ Before considering any implementation complete, perform a minimization pass over
 
 ## Build and Run
 
-* Requirements: Rust 1.98+, the `wasm32-unknown-unknown` target, and Trunk ^0.21.
+* Requirements: Rust 1.98+, the `wasm32-unknown-unknown` target, and Trunk ^0.22.
 * Dev loop: `cargo run` (backend, port 8000) + `cd frontend && trunk serve` (UI on 8080 with API proxy).
 * Release build: `cd frontend && trunk build --release` then `cargo build --release` (uses `--locked` in Docker; keep `Cargo.lock` accurate).
 * Docker: `docker compose up -d --build` (compose network must be `proxy-frontend`).

@@ -60,7 +60,7 @@ Install the frontend toolchain if needed:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install trunk --locked
+cargo install trunk --version ^0.22 --locked
 ```
 
 Build the frontend and start the backend from the repository root:

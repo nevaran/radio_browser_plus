@@ -5,7 +5,7 @@ FROM rust:1.98.1-bookworm AS frontend-builder
 WORKDIR /app
 
 RUN rustup target add wasm32-unknown-unknown \
-    && cargo install trunk --version ^0.21 --locked
+    && cargo install trunk --version ^0.22 --locked
 
 COPY Cargo.toml Cargo.lock ./
 COPY frontend ./frontend

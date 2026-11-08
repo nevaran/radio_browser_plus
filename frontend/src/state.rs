@@ -487,7 +487,11 @@ impl AppState {
     }
 
     fn current_station_id(&self) -> Option<String> {
-        self.player.current.get_untracked().as_ref().and_then(station_id)
+        self.player
+            .current
+            .get_untracked()
+            .as_ref()
+            .and_then(station_id)
     }
 
     fn play_queued(&self, station: Station) {
@@ -1246,16 +1250,15 @@ fn hex(b: u8) -> Option<u8> {
 /// Previous / next pick within a station list, with wraparound. Returns
 /// `None` for an empty list or a single-station list already playing (stepping
 /// would only reconnect the same stream).
-fn pick_neighbor(
-    list: &[Station],
-    current_id: Option<&str>,
-    delta: isize,
-) -> Option<Station> {
+fn pick_neighbor(list: &[Station], current_id: Option<&str>, delta: isize) -> Option<Station> {
     if list.is_empty() {
         return None;
     }
     let len = list.len() as isize;
-    match current_id.and_then(|id| list.iter().position(|s| station_id(s).as_deref() == Some(id))) {
+    match current_id.and_then(|id| {
+        list.iter()
+            .position(|s| station_id(s).as_deref() == Some(id))
+    }) {
         Some(index) => {
             if list.len() == 1 {
                 return None;
@@ -1306,7 +1309,10 @@ mod tests {
         let stations = list(&["a", "b"]);
         assert_eq!(pick_neighbor(&stations, None, 1).unwrap().name, "a");
         assert_eq!(pick_neighbor(&stations, None, -1).unwrap().name, "b");
-        assert_eq!(pick_neighbor(&stations, Some("missing"), 1).unwrap().name, "a");
+        assert_eq!(
+            pick_neighbor(&stations, Some("missing"), 1).unwrap().name,
+            "a"
+        );
     }
 
     #[test]

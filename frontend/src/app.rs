@@ -452,8 +452,8 @@ fn init_app(state: AppState) {
             state.reconnect();
         }) as Box<dyn Fn()>);
         if let Some(window) = web_sys::window() {
-            let _ =
-                window.add_event_listener_with_callback("online", on_online.as_ref().unchecked_ref());
+            let _ = window
+                .add_event_listener_with_callback("online", on_online.as_ref().unchecked_ref());
         }
         on_online.forget();
     }
@@ -463,7 +463,13 @@ fn init_app(state: AppState) {
 /// field is on screen. Bound to the `/` shortcut.
 fn focus_search_field(state: &AppState) {
     let narrow = web_sys::window()
-        .map(|w| w.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(f64::MAX) <= 768.0)
+        .map(|w| {
+            w.inner_width()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(f64::MAX)
+                <= 768.0
+        })
         .unwrap_or(false);
     if narrow {
         state.sidebar_open.set(true);

@@ -148,11 +148,8 @@ pub async fn fetch_admin_stats() -> Result<AdminStats, String> {
 }
 
 pub async fn heartbeat(station: Option<&str>) -> Result<(), String> {
-    let _: serde_json::Value = post_json(
-        "/api/heartbeat",
-        &serde_json::json!({ "station": station }),
-    )
-    .await?;
+    let _: serde_json::Value =
+        post_json("/api/heartbeat", &serde_json::json!({ "station": station })).await?;
     Ok(())
 }
 

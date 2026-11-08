@@ -58,13 +58,21 @@ pub fn update_media_metadata(station: &Station) {
         .unwrap_or_else(|| "Radio Browser Plus".to_string());
 
     let init = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&init, &JsValue::from_str("title"), &JsValue::from_str(&title));
+    let _ = js_sys::Reflect::set(
+        &init,
+        &JsValue::from_str("title"),
+        &JsValue::from_str(&title),
+    );
     let _ = js_sys::Reflect::set(
         &init,
         &JsValue::from_str("artist"),
         &JsValue::from_str(&artist),
     );
-    let _ = js_sys::Reflect::set(&init, &JsValue::from_str("album"), &JsValue::from_str(&album));
+    let _ = js_sys::Reflect::set(
+        &init,
+        &JsValue::from_str("album"),
+        &JsValue::from_str(&album),
+    );
 
     // Data-URL placeholders must not reach the OS: they are large and render
     // as noise on the lock screen. Only real (http) artwork is advertised.
@@ -93,11 +101,7 @@ pub fn clear_media_metadata() {
     let Some(session) = media_session() else {
         return;
     };
-    let _ = js_sys::Reflect::set(
-        &session,
-        &JsValue::from_str("metadata"),
-        &JsValue::NULL,
-    );
+    let _ = js_sys::Reflect::set(&session, &JsValue::from_str("metadata"), &JsValue::NULL);
 }
 
 /// Mirror the player state so the OS shows play vs. pause correctly.
@@ -146,8 +150,7 @@ pub fn init_media_handlers(
     set_handler(&session, "pause", pause.as_ref().unchecked_ref());
     pause.forget();
 
-    let previous =
-        Closure::wrap(Box::new(move |_: JsValue| on_previous()) as Box<dyn Fn(JsValue)>);
+    let previous = Closure::wrap(Box::new(move |_: JsValue| on_previous()) as Box<dyn Fn(JsValue)>);
     set_handler(&session, "previoustrack", previous.as_ref().unchecked_ref());
     previous.forget();
 

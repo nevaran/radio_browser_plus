@@ -7,8 +7,8 @@ use web_sys::HtmlImageElement;
 use crate::models::{station_id, Station};
 use crate::state::AppState;
 use crate::utils::{
-    card_playback, primary_image, station_flag_url, station_genre, truncate_name,
-    CardPlayback, PLACEHOLDER_SVG,
+    card_playback, primary_image, station_flag_url, station_genre, truncate_name, CardPlayback,
+    PLACEHOLDER_SVG,
 };
 
 /// Stroke icon used by empty-state blocks.

@@ -68,10 +68,16 @@ async fn main() {
         info!("Guest access disabled: sign-in required");
     }
     if admin_stats_enabled {
-        tracing::info!("ADMIN_STATS_ENABLED is on: active user/guest statistics are exposed to admins");
+        tracing::info!(
+            "ADMIN_STATS_ENABLED is on: active user/guest statistics are exposed to admins"
+        );
     }
     if log_retention_days > 0 {
-        tracing::info!(days = log_retention_days, "Activity logs retained for {} days", log_retention_days);
+        tracing::info!(
+            days = log_retention_days,
+            "Activity logs retained for {} days",
+            log_retention_days
+        );
     }
 
     // Initialize infrastructure
@@ -238,7 +244,9 @@ fn config_routes(allow_guest: bool) -> Router {
 
 /// Liveness endpoint, served outside the auth layer.
 fn health_routes(handlers: Arc<HealthHandlers>) -> Router {
-    Router::new().route("/health", get(health_check)).with_state(handlers)
+    Router::new()
+        .route("/health", get(health_check))
+        .with_state(handlers)
 }
 
 // ---------------------------------------------------------------------------
@@ -276,15 +284,11 @@ async fn get_station_by_id(
     s.get_by_id(id).await
 }
 
-async fn list_countries(
-    State(c): State<Arc<CollectionsHandlers>>,
-) -> Result<Json<Vec<Country>>> {
+async fn list_countries(State(c): State<Arc<CollectionsHandlers>>) -> Result<Json<Vec<Country>>> {
     c.countries().await
 }
 
-async fn list_languages(
-    State(c): State<Arc<CollectionsHandlers>>,
-) -> Result<Json<Vec<Language>>> {
+async fn list_languages(State(c): State<Arc<CollectionsHandlers>>) -> Result<Json<Vec<Language>>> {
     c.languages().await
 }
 
@@ -372,17 +376,19 @@ async fn health_check(State(h): State<Arc<HealthHandlers>>) -> Result<Json<Healt
 }
 
 async fn api_not_found() -> impl IntoResponse {
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({ "error": "Not found" })),
-    )
+    (StatusCode::NOT_FOUND, Json(json!({ "error": "Not found" })))
 }
 
 // Whether anonymous browsing is allowed. Opt-in via ALLOW_GUEST_ACCESS=1
 // (also accepts true/yes/on); anything else, including unset, means login is
 // required. Parsed separately for unit testing without touching the env.
 fn parse_guest_flag(raw: Option<&str>) -> bool {
-    raw.is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    raw.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn allow_guest_access() -> bool {
@@ -398,7 +404,8 @@ fn admin_stats_enabled() -> bool {
 }
 
 fn parse_log_retention_days(raw: Option<&str>) -> u64 {
-    raw.and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or(0)
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 fn log_retention_days() -> u64 {
@@ -445,8 +452,7 @@ async fn require_auth(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_public_api_path, parse_admin_stats_flag,
-        parse_guest_flag, parse_log_retention_days,
+        is_public_api_path, parse_admin_stats_flag, parse_guest_flag, parse_log_retention_days,
     };
 
     #[test]
@@ -465,14 +471,17 @@ mod tests {
         for raw in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
             assert!(parse_guest_flag(Some(raw)), "{raw:?} must allow guests");
         }
+        assert!(parse_guest_flag(Some(" true ")));
+        assert!(parse_guest_flag(Some(" YES ")));
     }
 
     #[test]
     fn admin_stats_flag_and_log_retention_days_parse_cleanly() {
         assert!(parse_admin_stats_flag(Some("1")));
-        assert!(parse_admin_stats_flag(Some("true")));
+        assert!(parse_admin_stats_flag(Some(" true ")));
         assert!(!parse_admin_stats_flag(Some("0")));
         assert_eq!(parse_log_retention_days(Some("7")), 7);
+        assert_eq!(parse_log_retention_days(Some(" 7 ")), 7);
         assert_eq!(parse_log_retention_days(None), 0);
         assert_eq!(parse_log_retention_days(Some("0")), 0);
         assert_eq!(parse_log_retention_days(Some("30")), 30);

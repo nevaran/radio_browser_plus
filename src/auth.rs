@@ -439,6 +439,20 @@ fn sanitize_for_log(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).take(64).collect()
 }
 
+fn parse_admin_stats_flag(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn parse_log_retention_days(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 /// Recent login failures per username: (window start, attempts in window).
 type LoginFailures = HashMap<String, (chrono::DateTime<Utc>, u32)>;
 /// Bound on tracked usernames so failure tracking itself cannot grow without
@@ -477,15 +491,10 @@ impl AuthService {
             }
             Err(_) => HashMap::new(),
         };
-        let stats_enabled = std::env::var("ADMIN_STATS_ENABLED")
-            .ok()
-            .as_deref()
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
-        let log_retention_days = std::env::var("LOG_RETENTION_DAYS")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(0);
+        let stats_enabled =
+            parse_admin_stats_flag(std::env::var("ADMIN_STATS_ENABLED").ok().as_deref());
+        let log_retention_days =
+            parse_log_retention_days(std::env::var("LOG_RETENTION_DAYS").ok().as_deref());
         let activity_log = ActivityLog::new(root_dir.join("activity.log"), log_retention_days);
 
         if let Some(parent) = users_path.parent() {
@@ -612,20 +621,22 @@ impl AuthService {
             || headers
                 .get("forwarded")
                 .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value.split(';').any(|pair| {
-                    pair.trim()
-                        .split('=')
-                        .map(str::trim)
-                        .collect::<Vec<_>>()
-                        .get(0)
-                        .is_some_and(|key| key.eq_ignore_ascii_case("proto"))
-                        && pair
+                .is_some_and(|value| {
+                    value.split(';').any(|pair| {
+                        pair.trim()
                             .split('=')
                             .map(str::trim)
                             .collect::<Vec<_>>()
-                            .get(1)
-                            .is_some_and(|value| value.eq_ignore_ascii_case("https"))
-                }))
+                            .get(0)
+                            .is_some_and(|key| key.eq_ignore_ascii_case("proto"))
+                            && pair
+                                .split('=')
+                                .map(str::trim)
+                                .collect::<Vec<_>>()
+                                .get(1)
+                                .is_some_and(|value| value.eq_ignore_ascii_case("https"))
+                    })
+                })
     }
 
     fn session_cookie_name(headers: &HeaderMap) -> &'static str {
@@ -823,13 +834,8 @@ impl AuthService {
             },
         );
         self.write_sessions(&sessions);
-        self.activity_log.record(
-            "session_start",
-            Some(&normalized),
-            Some(&ip),
-            None,
-            None,
-        );
+        self.activity_log
+            .record("session_start", Some(&normalized), Some(&ip), None, None);
         tracing::info!(username = %sanitize_for_log(&normalized), "User logged in");
         Ok((user, session_id))
     }
@@ -1067,13 +1073,8 @@ impl AuthService {
         match guest_sessions.entry(guest_id.clone()) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(entry);
-                self.activity_log.record(
-                    "guest_session_start",
-                    None,
-                    Some(&ip),
-                    station,
-                    None,
-                );
+                self.activity_log
+                    .record("guest_session_start", None, Some(&ip), station, None);
             }
             std::collections::hash_map::Entry::Occupied(mut existing) => {
                 let existing = existing.get_mut();
@@ -1192,7 +1193,8 @@ impl AuthService {
         if let Ok((session_id, user)) = self.session_with_user(&headers) {
             self.renew_session_on_heartbeat(&session_id, &user.username, station_name, now);
             self.track_heartbeat(&headers, Some(&user.username), station_name, now);
-            let response = (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
+            let response =
+                (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
             return Self::no_store(response);
         }
 
@@ -1205,11 +1207,16 @@ impl AuthService {
         };
         self.track_heartbeat(&headers, None, station_name, now);
 
-        let response = (StatusCode::OK, Json(serde_json::json!({ "ok": true, "guest_id": guest_id }))).into_response();
+        let response = (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "guest_id": guest_id })),
+        )
+            .into_response();
         let mut response = Self::no_store(response);
-        response
-            .headers_mut()
-            .append(header::SET_COOKIE, Self::guest_cookie_header(&guest_id, &headers));
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            Self::guest_cookie_header(&guest_id, &headers),
+        );
         response
     }
 
@@ -1359,11 +1366,8 @@ impl AuthService {
             self.logout(&session_id);
         }
         if Self::extract_guest_session_id(&headers).is_some() {
-            let mut response = (
-                StatusCode::OK,
-                Json(serde_json::json!({ "success": true })),
-            )
-            .into_response();
+            let mut response =
+                (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response();
             response.headers_mut().append(
                 header::SET_COOKIE,
                 Self::clear_guest_cookie_header(&headers),

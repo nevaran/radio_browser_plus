@@ -124,7 +124,10 @@ fn password_change_revokes_sessions() {
 fn insecure_local_http_sessions_are_accepted() {
     let mut headers = HeaderMap::new();
     headers.insert("cookie", HeaderValue::from_static("session_id=abc123"));
-    assert_eq!(AuthService::extract_session_id(&headers), Some("abc123".to_string()));
+    assert_eq!(
+        AuthService::extract_session_id(&headers),
+        Some("abc123".to_string())
+    );
 }
 
 #[test]
@@ -135,7 +138,10 @@ fn secure_proxied_sessions_still_use_host_cookie() {
         "cookie",
         HeaderValue::from_static("__Host-session_id=abc123"),
     );
-    assert_eq!(AuthService::extract_session_id(&headers), Some("abc123".to_string()));
+    assert_eq!(
+        AuthService::extract_session_id(&headers),
+        Some("abc123".to_string())
+    );
 }
 
 #[test]
@@ -180,8 +186,7 @@ fn admin_stats_only_counts_users_that_sent_a_page_heartbeat() {
         station: Some("Radio Nova".to_string()),
     });
     assert_eq!(
-        auth.heartbeat_response(headers.clone(), payload)
-            .status(),
+        auth.heartbeat_response(headers.clone(), payload).status(),
         StatusCode::OK
     );
 
@@ -209,8 +214,7 @@ fn admin_stats_only_counts_users_that_sent_a_page_heartbeat() {
     // The next heartbeat after the silence starts a fresh timer.
     let payload = Json(HeartbeatRequest { station: None });
     assert_eq!(
-        auth.heartbeat_response(headers.clone(), payload)
-            .status(),
+        auth.heartbeat_response(headers.clone(), payload).status(),
         StatusCode::OK
     );
     let stats = auth.admin_stats();
@@ -240,8 +244,7 @@ fn guest_activity_tracks_one_timer_per_ip() {
         station: Some("Jazz FM".to_string()),
     });
     assert_eq!(
-        auth.heartbeat_response(headers.clone(), payload)
-            .status(),
+        auth.heartbeat_response(headers.clone(), payload).status(),
         StatusCode::OK
     );
 
@@ -257,10 +260,7 @@ fn guest_activity_tracks_one_timer_per_ip() {
     // A second guest browser on the same IP joins the same per-IP timer
     // instead of creating a duplicate row.
     let mut headers_same_ip = HeaderMap::new();
-    headers_same_ip.insert(
-        "x-forwarded-for",
-        HeaderValue::from_static("203.0.113.7"),
-    );
+    headers_same_ip.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
     let payload = Json(HeartbeatRequest { station: None });
     auth.heartbeat_response(headers_same_ip, payload);
     assert_eq!(auth.admin_stats().guests.len(), 1);

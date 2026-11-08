@@ -96,11 +96,10 @@ pub fn sort_stations(stations: &mut [Station], mode: SortMode) {
     match mode {
         SortMode::Featured => {}
         SortMode::Name => sort_by_name_asc(stations, station_sort_key),
-        SortMode::Popularity => stations
-            .sort_by_key(|s| std::cmp::Reverse(s.clickcount.unwrap_or(0))),
-        SortMode::Bitrate => {
-            stations.sort_by_key(|s| std::cmp::Reverse(s.bitrate.unwrap_or(0)))
+        SortMode::Popularity => {
+            stations.sort_by_key(|s| std::cmp::Reverse(s.clickcount.unwrap_or(0)))
         }
+        SortMode::Bitrate => stations.sort_by_key(|s| std::cmp::Reverse(s.bitrate.unwrap_or(0))),
     }
 }
 
@@ -427,10 +426,7 @@ mod tests {
             title_for_view("countries", Some("Germany"), ""),
             "Countries: Germany"
         );
-        assert_eq!(
-            title_for_view("genres", Some("Rock"), ""),
-            "Genres: Rock"
-        );
+        assert_eq!(title_for_view("genres", Some("Rock"), ""), "Genres: Rock");
         assert_eq!(title_for_view("search", None, "jazz"), "Search: jazz");
         assert_eq!(title_for_view("search", None, "  "), "Popular");
     }

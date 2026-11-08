@@ -513,6 +513,12 @@ impl AuthService {
             activity_log,
             login_failures: Arc::new(Mutex::new(HashMap::new())),
         };
+        if !auth.users_path.exists() {
+            auth.write_users(&auth.users.read().unwrap());
+        }
+        if !auth.sessions_path.exists() {
+            auth.write_sessions(&auth.sessions.read().unwrap());
+        }
         auth.activity_log.initialize();
         auth
     }

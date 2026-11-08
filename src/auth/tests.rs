@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn missing_auth_json_files_are_created_on_startup() {
+    let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
+    let _auth = AuthService::new(&temp_dir);
+
+    for file_name in ["users.json", "sessions.json"] {
+        let contents = fs::read_to_string(temp_dir.join(file_name)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&contents).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
+#[test]
 fn create_user_for_reader_is_allowed_for_admin() {
     let temp_dir = std::env::temp_dir().join(format!("radio-auth-{}", uuid::Uuid::new_v4()));
     let auth = AuthService::new(&temp_dir);

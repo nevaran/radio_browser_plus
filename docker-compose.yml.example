@@ -1,6 +1,6 @@
 services:
   app:
-    image: nevaran/radio-browser-plus:latest
+    image: nevaran/radio-browser-plus:1.1.0
     container_name: radio-browser-plus
     # No published ports: traffic arrives via the reverse proxy network below.
     # The app itself speaks plain HTTP on 8000; terminate TLS at the proxy.

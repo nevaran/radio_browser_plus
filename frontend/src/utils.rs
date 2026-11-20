@@ -51,14 +51,16 @@ pub enum SortMode {
     /// Popular).
     Featured,
     Name,
+    Country,
     Popularity,
     Bitrate,
 }
 
 impl SortMode {
-    pub const ALL: [SortMode; 4] = [
+    pub const ALL: [SortMode; 5] = [
         SortMode::Featured,
         SortMode::Name,
+        SortMode::Country,
         SortMode::Popularity,
         SortMode::Bitrate,
     ];
@@ -67,6 +69,7 @@ impl SortMode {
         match self {
             SortMode::Featured => "featured",
             SortMode::Name => "name",
+            SortMode::Country => "country",
             SortMode::Popularity => "popularity",
             SortMode::Bitrate => "bitrate",
         }
@@ -76,6 +79,7 @@ impl SortMode {
         match self {
             SortMode::Featured => "Featured",
             SortMode::Name => "Name A–Z",
+            SortMode::Country => "Country A–Z",
             SortMode::Popularity => "Most played",
             SortMode::Bitrate => "Bitrate",
         }
@@ -96,6 +100,10 @@ pub fn sort_stations(stations: &mut [Station], mode: SortMode) {
     match mode {
         SortMode::Featured => {}
         SortMode::Name => sort_by_name_asc(stations, station_sort_key),
+        SortMode::Country => stations.sort_by_cached_key(|station| {
+            let country = station.country.as_deref().unwrap_or("").trim();
+            (country.is_empty(), country.to_lowercase())
+        }),
         SortMode::Popularity => {
             stations.sort_by_key(|s| std::cmp::Reverse(s.clickcount.unwrap_or(0)))
         }
@@ -476,6 +484,60 @@ mod tests {
         sort_stations(&mut stations, SortMode::Name);
         let by_name: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(by_name, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn sorts_by_country_case_insensitively_and_puts_unknown_last() {
+        let mut stations = vec![
+            Station {
+                name: "No country".into(),
+                country: None,
+                ..Station::default()
+            },
+            Station {
+                name: "Japan".into(),
+                country: Some("Japan".into()),
+                ..Station::default()
+            },
+            Station {
+                name: "Germany".into(),
+                country: Some("germany".into()),
+                ..Station::default()
+            },
+            Station {
+                name: "Brazil B".into(),
+                country: Some("Brazil".into()),
+                ..Station::default()
+            },
+            Station {
+                name: "Brazil A".into(),
+                country: Some("Brazil".into()),
+                ..Station::default()
+            },
+            Station {
+                name: "Empty country".into(),
+                country: Some("  ".into()),
+                ..Station::default()
+            },
+        ];
+
+        sort_stations(&mut stations, SortMode::Country);
+
+        let names: Vec<&str> = stations
+            .iter()
+            .map(|station| station.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Brazil B",
+                "Brazil A",
+                "Germany",
+                "Japan",
+                "No country",
+                "Empty country"
+            ]
+        );
     }
 
     #[test]

@@ -2043,6 +2043,15 @@ a:focus-visible,
   white-space: nowrap;
 }
 
+.mobile-volume-toggle,
+.mobile-volume-backdrop {
+  display: none;
+}
+
+.volume-slider-controls {
+  display: contents;
+}
+
 .favorite-current {
   display: inline-flex;
   align-items: center;
@@ -2725,10 +2734,12 @@ a:focus-visible,
     gap: 0.45rem;
   }
 
+  /* No max-height here: the compact bar is two rows (controls + station
+     meta) and its bottom padding has to clear the system gesture bar.
+     Clamping the box pushed the details row past the viewport edge. */
   .now-playing-bar {
     gap: 0.35rem;
     padding: 0.4rem 0.4rem calc(0.4rem + max(var(--sab), var(--sab-min)));
-    max-height: calc(75px + max(var(--sab), var(--sab-min)));
   }
 
   .favorite-current {
@@ -2781,6 +2792,108 @@ a:focus-visible,
     font-size: 0.55rem;
   }
 
+  .now-playing-bar .volume-icon:not(.mobile-volume-toggle) {
+    display: none;
+  }
+
+  .now-playing-bar .mobile-volume-toggle {
+    display: inline-flex;
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: #111624;
+  }
+
+  .now-playing-bar.compact .mobile-volume-toggle {
+    width: 32px;
+    height: 32px;
+  }
+
+  .now-playing-bar .volume-control,
+  .now-playing-bar.compact .volume-control {
+    position: static;
+    flex: 0 0 auto;
+    margin-left: 0;
+  }
+
+  .now-playing-bar .volume-slider-controls {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% - 1px);
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-bottom: 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: linear-gradient(180deg, #0f1422, #090c16);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(100%);
+    transition:
+      opacity 180ms ease,
+      transform 180ms var(--ease-out),
+      visibility 0s linear 180ms;
+  }
+
+  .now-playing-bar .volume-control.open .volume-slider-controls {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+    transition:
+      opacity 180ms ease,
+      transform 180ms var(--ease-out),
+      visibility 0s;
+  }
+
+  .mobile-volume-slider,
+  .now-playing-bar.compact .mobile-volume-slider {
+    width: 24px;
+    min-width: 24px;
+    max-width: 24px;
+    height: 128px;
+    flex: 0 0 128px;
+    writing-mode: vertical-lr;
+    direction: rtl;
+    background: linear-gradient(
+      to top,
+      var(--accent) calc(var(--vol) * 100%),
+      rgba(255, 255, 255, 0.12) calc(var(--vol) * 100%)
+    );
+  }
+
+  .mobile-volume-slider::-moz-range-track {
+    width: 6px;
+    height: 100%;
+  }
+
+  .now-playing-bar .volume-slider-controls .volume-display,
+  .now-playing-bar.compact .volume-slider-controls .volume-display {
+    min-width: 0;
+    text-align: center;
+  }
+
+  .mobile-volume-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 19;
+    display: block;
+    background: transparent;
+  }
+
+  .now-playing-bar .now-playing-controls,
+  .now-playing-bar.compact .now-playing-controls {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 0;
+  }
+
   .auth-modal-content.stats-modal {
     padding: 0.85rem 0.8rem;
     border-radius: var(--radius-md);
@@ -2792,5 +2905,46 @@ a:focus-visible,
 
   .stats-entry-head {
     font-size: 0.84rem;
+  }
+}
+
+@media (max-width: 320px) {
+  .now-playing-bar.compact .now-playing-main-row {
+    gap: 0.2rem;
+  }
+
+  .now-playing-bar.compact .now-playing-left {
+    gap: 0.2rem;
+  }
+
+  .now-playing-bar.compact .transport-controls {
+    gap: 0.15rem;
+  }
+
+  .now-playing-bar.compact .skip-btn {
+    width: 26px;
+    height: 26px;
+  }
+
+  .now-playing-bar.compact .play-stop-container {
+    width: 40px;
+    flex: 0 0 40px;
+  }
+
+  .now-playing-bar.compact #play-stop-btn {
+    width: 34px;
+    height: 34px;
+    min-width: 34px;
+  }
+
+  .now-playing-bar.compact .favorite-current,
+  .now-playing-bar.compact .share-current {
+    width: 30px;
+    height: 30px;
+  }
+
+  .now-playing-bar.compact .mobile-volume-toggle {
+    width: 30px;
+    height: 30px;
   }
 }

@@ -32,7 +32,7 @@ Keyboard shortcuts: `/` focuses search, `Space` toggles playback, `M` toggles mu
    docker compose up -d
    ```
 
-The published image is `nevaran/radio-browser-plus` and currently targets `linux/amd64`.
+The published image is `nevaran/radio-browser-plus` and currently only targets `linux/amd64`.
 
 Compose attaches the app to `proxy-frontend` and does not publish port 8000 on the host. Configure your reverse proxy on that network to forward to `radio-browser-plus:8000` and terminate HTTPS there. For direct local access, uncomment the port mapping in `docker-compose.yml`.
 

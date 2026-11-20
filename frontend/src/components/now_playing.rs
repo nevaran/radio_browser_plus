@@ -46,11 +46,14 @@ pub fn NowPlaying() -> impl IntoView {
     let favorites = st.favorites;
     let user = st.user;
 
+    let mobile_volume_open = RwSignal::new(false);
+
     // Compact-mode detection: same overflow rule as the old UI. Re-runs when
     // the track changes or the viewport is resized.
     Effect::new(move |_| {
         current.get();
         resize_tick.get();
+        mobile_volume_open.set(false);
         store.with_value(|s| s.compact_bar.set(false));
         after_paint(move || {
             let overflow = web_sys::window()
@@ -66,82 +69,99 @@ pub fn NowPlaying() -> impl IntoView {
 
     view! {
         <Show when=move || current.with(|c| c.is_some())>
+            <>
             <div
                 id="now-playing-bar"
                 class="now-playing-bar"
                 class:compact=move || compact_bar.get()
+                on:click=move |_| {
+                    if mobile_volume_open.get_untracked() {
+                        mobile_volume_open.set(false);
+                    }
+                }
+                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    if ev.key() == "Escape" && mobile_volume_open.get_untracked() {
+                        ev.prevent_default();
+                        mobile_volume_open.set(false);
+                        if let Some(toggle) = web_sys::window()
+                            .and_then(|w| w.document())
+                            .and_then(|d| d.get_element_by_id("mobile-volume-toggle"))
+                            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+                        {
+                            let _ = toggle.focus();
+                        }
+                    }
+                }
             >
                 <div class="now-playing-main-row">
                     <div class="now-playing-left">
-                            <button
-                                id="share-current"
-                                class="share-current"
-                                title="Share station link"
-                                aria-label="Share station link"
-                                on:click=move |_| {
-                                    store.with_value(|s| {
-                                        if let Some(station) = s.player.current.get_untracked() {
-                                            s.share_station(station);
-                                        }
-                                    });
-                                }
-                            >
-                                // iOS-style share mark: box with an upward arrow,
-                                // stroke-only to match the heart icon.
-                                <svg
-                                    class="share-icon"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    stroke-width="1.8"
-                                    stroke-linecap="round"
-                                    stroke-linejoin="round"
-                                    aria-hidden="true"
-                                >
-                                    <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
-                                    <path d="M16 6l-4-4-4 4" />
-                                    <path d="M12 2v13" />
-                                </svg>
-                            </button>
-                        <Show when=move || user.with(|u| u.is_some())>
                         <button
-                            id="favorite-current"
-                            class="favorite-current"
-                            class:is-favorited=move || current_is_favorite(current, favorites)
-                            title=move || {
-                                if current_is_favorite(current, favorites) {
-                                    "Remove from favorites"
-                                } else {
-                                    "Add to favorites"
-                                }
-                            }
-                            aria-label="Toggle favorite"
+                            id="share-current"
+                            class="share-current"
+                            title="Share station link"
+                            aria-label="Share station link"
                             on:click=move |_| {
                                 store.with_value(|s| {
                                     if let Some(station) = s.player.current.get_untracked() {
-                                        s.toggle_favorite(station);
+                                        s.share_station(station);
                                     }
                                 });
                             }
                         >
-                            {move || {
-                                let favorited = current_is_favorite(current, favorites);
-                                view! {
-                                    <svg
-                                        class="heart-icon"
-                                        viewBox="0 0 24 24"
-                                        fill=if favorited { "currentColor" } else { "none" }
-                                        stroke="currentColor"
-                                        stroke-width="1.8"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                        aria-hidden="true"
-                                    >
-                                        <path d="M12 20.5S3.8 15.4 3.8 9.6A4.6 4.6 0 0 1 12 7.1a4.6 4.6 0 0 1 8.2 2.5c0 5.8-8.2 10.9-8.2 10.9Z" />
-                                    </svg>
-                                }
-                            }}
+                            <svg
+                                class="share-icon"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.8"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                            >
+                                <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+                                <path d="M16 6l-4-4-4 4" />
+                                <path d="M12 2v13" />
+                            </svg>
                         </button>
+                        <Show when=move || user.with(|u| u.is_some())>
+                            <button
+                                id="favorite-current"
+                                class="favorite-current"
+                                class:is-favorited=move || current_is_favorite(current, favorites)
+                                title=move || {
+                                    if current_is_favorite(current, favorites) {
+                                        "Remove from favorites"
+                                    } else {
+                                        "Add to favorites"
+                                    }
+                                }
+                                aria-label="Toggle favorite"
+                                on:click=move |_| {
+                                    store.with_value(|s| {
+                                        if let Some(station) = s.player.current.get_untracked() {
+                                            s.toggle_favorite(station);
+                                        }
+                                    });
+                                }
+                            >
+                                {move || {
+                                    let favorited = current_is_favorite(current, favorites);
+                                    view! {
+                                        <svg
+                                            class="heart-icon"
+                                            viewBox="0 0 24 24"
+                                            fill=if favorited { "currentColor" } else { "none" }
+                                            stroke="currentColor"
+                                            stroke-width="1.8"
+                                            stroke-linecap="round"
+                                            stroke-linejoin="round"
+                                            aria-hidden="true"
+                                        >
+                                            <path d="M12 20.5S3.8 15.4 3.8 9.6A4.6 4.6 0 0 1 12 7.1a4.6 4.6 0 0 1 8.2 2.5c0 5.8-8.2 10.9-8.2 10.9Z" />
+                                        </svg>
+                                    }
+                                }}
+                            </button>
                         </Show>
                         <div class="now-playing-icon-section">
                             <img
@@ -305,7 +325,11 @@ pub fn NowPlaying() -> impl IntoView {
                     </div>
 
                     <div class="now-playing-controls">
-                        <div class="volume-control">
+                        <div
+                            class="volume-control"
+                            class:open=move || mobile_volume_open.get()
+                            on:click=|ev| ev.stop_propagation()
+                        >
                             <button
                                 id="volume-icon"
                                 class="volume-icon"
@@ -335,33 +359,74 @@ pub fn NowPlaying() -> impl IntoView {
                                     }
                                 }}
                             </button>
-                            <input
-                                id="volume-slider"
-                                type="range"
-                                min="0"
-                                max="1"
-                                step="0.01"
-                                class="volume-slider"
-                                aria-label="Volume"
-                                style=move || {
-                                    let effective = if muted.get() { 0.0 } else { volume.get() };
-                                    format!("--vol:{effective:.2}")
+                            <button
+                                id="mobile-volume-toggle"
+                                class="volume-icon mobile-volume-toggle"
+                                type="button"
+                                title="Volume controls"
+                                aria-label="Volume controls"
+                                aria-controls="mobile-volume-popover"
+                                aria-expanded=move || {
+                                    if mobile_volume_open.get() { "true" } else { "false" }
                                 }
-                                prop:value=move || format!("{:.2}", volume.get())
-                                on:input=move |ev| {
-                                    if let Ok(v) = event_target_value(&ev).parse::<f64>() {
-                                        store.with_value(|s| s.player.set_volume(v));
-                                    }
+                                on:click=move |_| {
+                                    mobile_volume_open.update(|open| *open = !*open)
                                 }
-                            />
-                            <span id="volume-display" class="volume-display">
+                            >
                                 {move || {
-                                    let is_muted = muted.get();
-                                    let vol = volume.get();
-                                    let effective = if is_muted { 0.0 } else { vol };
-                                    format!("{}%", (effective * 100.0).round() as u32)
+                                    if muted.get() {
+                                        view! {
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M11 5 6.5 9H3v6h3.5L11 19V5Z" />
+                                                <path d="m16.5 9.5 5 5m0-5-5 5" />
+                                            </svg>
+                                        }
+                                        .into_any()
+                                    } else {
+                                        view! {
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M11 5 6.5 9H3v6h3.5L11 19V5Z" />
+                                                <path d="M15.2 9.3a4 4 0 0 1 0 5.4M18 6.8a8 8 0 0 1 0 10.4" />
+                                            </svg>
+                                        }
+                                        .into_any()
+                                    }
                                 }}
-                            </span>
+                            </button>
+                            <div
+                                id="mobile-volume-popover"
+                                class="volume-slider-controls"
+                                role="group"
+                                aria-label="Volume controls"
+                            >
+                                <input
+                                    id="volume-slider"
+                                    type="range"
+                                    min="0"
+                                    max="1"
+                                    step="0.01"
+                                    class="volume-slider mobile-volume-slider"
+                                    aria-label="Volume"
+                                    style=move || {
+                                        let effective = if muted.get() { 0.0 } else { volume.get() };
+                                        format!("--vol:{effective:.2}")
+                                    }
+                                    prop:value=move || format!("{:.2}", volume.get())
+                                    on:input=move |ev| {
+                                        if let Ok(v) = event_target_value(&ev).parse::<f64>() {
+                                            store.with_value(|s| s.player.set_volume(v));
+                                        }
+                                    }
+                                />
+                                <span id="volume-display" class="volume-display">
+                                    {move || {
+                                        let is_muted = muted.get();
+                                        let vol = volume.get();
+                                        let effective = if is_muted { 0.0 } else { vol };
+                                        format!("{}%", (effective * 100.0).round() as u32)
+                                    }}
+                                </span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -403,6 +468,14 @@ pub fn NowPlaying() -> impl IntoView {
                     </div>
                 </div>
             </div>
+            <Show when=move || mobile_volume_open.get()>
+                <div
+                    class="mobile-volume-backdrop"
+                    aria-hidden="true"
+                    on:click=move |_| mobile_volume_open.set(false)
+                ></div>
+            </Show>
+            </>
         </Show>
     }
 }

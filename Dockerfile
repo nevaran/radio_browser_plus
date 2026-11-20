@@ -28,7 +28,10 @@ COPY src ./src
 # even when only building the backend package.
 COPY frontend ./frontend
 
-RUN cargo build --release --locked
+# Release Please can bump workspace manifests without syncing every local
+# package entry in Cargo.lock. Sync workspace entries, then lock dependencies.
+RUN cargo update --workspace \
+    && cargo build --release --locked
 
 FROM alpine:latest AS runtime
 

@@ -12,8 +12,8 @@ use wasm_bindgen::JsCast;
 
 use crate::api;
 use crate::models::{
-    favorite_to_station, station_id, station_stream_url, AdminStats, CollectionItem, Country,
-    Favorite, Language, Station, Tag, User,
+    favorite_to_station, station_id, station_id_ref, station_stream_url, AdminStats,
+    CollectionItem, Country, Favorite, Language, Station, Tag, User,
 };
 use crate::player::Player;
 use crate::utils::{
@@ -276,7 +276,7 @@ impl AppState {
                     .stations
                     .get_untracked()
                     .into_iter()
-                    .find(|s| station_id(s).as_deref() == Some(id.as_str()));
+                    .find(|s| station_id_ref(s) == Some(id.as_str()));
                 if let Some(station) = station {
                     let this = self.clone();
                     leptos::task::spawn_local(async move {
@@ -429,11 +429,17 @@ impl AppState {
         let queued = self.queue.get();
         let current_id = self.player.current.get().as_ref().and_then(station_id);
         if let Some(ref id) = current_id {
-            if queued.iter().any(|s| station_id(s).as_deref() == Some(id)) {
+            if queued
+                .iter()
+                .any(|s| station_id_ref(s) == Some(id.as_str()))
+            {
                 return queued.len() > 1;
             }
             let visible = self.stations.get();
-            if visible.iter().any(|s| station_id(s).as_deref() == Some(id)) {
+            if visible
+                .iter()
+                .any(|s| station_id_ref(s) == Some(id.as_str()))
+            {
                 return visible.len() > 1;
             }
         }
@@ -455,11 +461,17 @@ impl AppState {
             .as_ref()
             .and_then(station_id);
         if let Some(ref id) = current_id {
-            if queued.iter().any(|s| station_id(s).as_deref() == Some(id)) {
+            if queued
+                .iter()
+                .any(|s| station_id_ref(s) == Some(id.as_str()))
+            {
                 return queued;
             }
             let visible = self.stations.get_untracked();
-            if visible.iter().any(|s| station_id(s).as_deref() == Some(id)) {
+            if visible
+                .iter()
+                .any(|s| station_id_ref(s) == Some(id.as_str()))
+            {
                 return visible;
             }
         }
@@ -1181,10 +1193,11 @@ fn to_collection<T: CollectionRow>(mut items: Vec<T>, kind: &str) -> Vec<Collect
     items
         .into_iter()
         .map(|item| {
-            let label = if item.label().trim().is_empty() {
+            let label = item.label();
+            let label = if label.trim().is_empty() {
                 "Unknown".to_string()
             } else {
-                item.label()
+                label
             };
             let icon_url = if kind == "countries" {
                 item.iso()
@@ -1255,10 +1268,7 @@ fn pick_neighbor(list: &[Station], current_id: Option<&str>, delta: isize) -> Op
         return None;
     }
     let len = list.len() as isize;
-    match current_id.and_then(|id| {
-        list.iter()
-            .position(|s| station_id(s).as_deref() == Some(id))
-    }) {
+    match current_id.and_then(|id| list.iter().position(|s| station_id_ref(s) == Some(id))) {
         Some(index) => {
             if list.len() == 1 {
                 return None;
@@ -1276,7 +1286,7 @@ fn pick_neighbor(list: &[Station], current_id: Option<&str>, delta: isize) -> Op
 }
 
 fn queue_contains(list: &[Station], id: &str) -> bool {
-    list.iter().any(|s| station_id(s).as_deref() == Some(id))
+    list.iter().any(|s| station_id_ref(s) == Some(id))
 }
 
 #[cfg(test)]

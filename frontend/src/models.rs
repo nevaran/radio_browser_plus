@@ -238,17 +238,23 @@ pub struct CollectionItem {
 }
 
 pub fn station_id(station: &Station) -> Option<String> {
+    station_id_ref(station).map(str::to_owned)
+}
+
+/// Borrowing form of [`station_id`] for comparison paths that scan large
+/// station lists and must not allocate a `String` per element.
+pub fn station_id_ref(station: &Station) -> Option<&str> {
     if !station.stationuuid.is_empty() {
-        return Some(station.stationuuid.clone());
+        return Some(&station.stationuuid);
     }
-    if let Some(uuid) = &station.uuid {
+    if let Some(uuid) = station.uuid.as_deref() {
         if !uuid.is_empty() {
-            return Some(uuid.clone());
+            return Some(uuid);
         }
     }
-    if let Some(id) = &station.id {
+    if let Some(id) = station.id.as_deref() {
         if !id.is_empty() {
-            return Some(id.clone());
+            return Some(id);
         }
     }
     None

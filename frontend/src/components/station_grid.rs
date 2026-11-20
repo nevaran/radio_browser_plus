@@ -4,7 +4,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlImageElement;
 
-use crate::models::{station_id, Station};
+use crate::models::{station_id, station_id_ref, Station};
 use crate::state::AppState;
 use crate::utils::{
     card_playback, primary_image, station_flag_url, station_genre, truncate_name, CardPlayback,
@@ -148,20 +148,21 @@ fn StationCard(station: Station) -> impl IntoView {
 
     let is_current = move || {
         id_store.with_value(|id| {
-            current.with(|c| c.as_ref().and_then(station_id).as_deref() == Some(id.as_str()))
+            current.with(|c| c.as_ref().and_then(station_id_ref) == Some(id.as_str()))
         })
     };
 
     // Playback badge follows the player, not the selection: only a station
     // that is actually sounding (or audibly buffering) reads "Playing".
-    let status = move || card_playback(is_current(), is_playing.get(), loading.get());
+    // Cached so the four reactive consumers below share one computation.
+    let status = Memo::new(move |_| card_playback(is_current(), is_playing.get(), loading.get()));
 
     view! {
         <article
             class="station-card"
             class:favorite=move || fav_id.with_value(|fid| favorites.with(|m| m.contains_key(fid)))
-            class:current=move || !matches!(status(), CardPlayback::Idle)
-            class:playing=move || matches!(status(), CardPlayback::Playing)
+            class:current=move || !matches!(status.get(), CardPlayback::Idle)
+            class:playing=move || matches!(status.get(), CardPlayback::Playing)
             data-station=article_id
             role="button"
             tabindex="0"
@@ -196,8 +197,8 @@ fn StationCard(station: Station) -> impl IntoView {
                         }
                     }
                 />
-                <Show when=move || !matches!(status(), CardPlayback::Idle)>
-                    {move || match status() {
+                <Show when=move || !matches!(status.get(), CardPlayback::Idle)>
+                    {move || match status.get() {
                         CardPlayback::Loading => view! {
                             <span class="playing-pill loading">
                                 <span class="eq" aria-hidden="true">

@@ -40,6 +40,7 @@ impl CollectionsHandlers {
         Ok(Json(
             languages
                 .into_iter()
+                .filter(|language| is_language_label(&language.name))
                 .map(|mut language| {
                     language.stationcount = language.stationcount.map(|n| n.min(limit));
                     language
@@ -66,6 +67,19 @@ impl CollectionsHandlers {
         let limit = super::stations::default_station_limit();
         Ok(Json(aggregate_genre_counts(&tags, limit)))
     }
+}
+
+fn is_language_label(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty()
+        && !name.chars().any(char::is_numeric)
+        && name.chars().any(char::is_alphabetic)
+        && name.chars().all(|character| {
+            character.is_alphabetic()
+                || character.is_whitespace()
+                || matches!(character, '-' | '\'' | '’' | '.' | ',' | '(' | ')')
+        })
+        && crate::genres::classify(name).is_none()
 }
 
 /// Fold raw upstream tags into the curated catalog. Pure function so the
@@ -112,6 +126,31 @@ mod tests {
         Tag {
             name: name.to_string(),
             stationcount: Some(count),
+        }
+    }
+
+    #[test]
+    fn language_list_filters_numeric_and_non_language_tags() {
+        for name in [
+            "#japan",
+            "#spanish",
+            "+7 languages",
+            "1",
+            "111",
+            "123",
+            "128 brazilian portuguese",
+            "17 additional languages",
+            "80s",
+            "rock",
+        ] {
+            assert!(!is_language_label(name), "{name:?} should be excluded");
+        }
+    }
+
+    #[test]
+    fn language_list_keeps_alphabetic_names_and_native_scripts() {
+        for name in ["English", "Acadian French", "K'iche'", "العربية", "中文"] {
+            assert!(is_language_label(name), "{name:?} should be included");
         }
     }
 

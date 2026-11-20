@@ -32,7 +32,7 @@ RUN cargo build --release --locked
 
 FROM alpine:latest AS runtime
 
-RUN apk add --no-cache ca-certificates
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
 RUN addgroup -S app && adduser -S -G app app
 
 WORKDIR /app

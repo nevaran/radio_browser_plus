@@ -17,7 +17,7 @@ Keyboard shortcuts: `/` focuses search, `Space` toggles playback, `M` toggles mu
 
 ## Docker Deployment
 
-1. Copy `.env.example` to `.env` and set the options described below.
+1. Copy `.env.example` to `.env` and `docker-compose.yml.example` to `docker-compose.yml`. Set the options described below in `.env`.
 2. Ensure the external Docker network `proxy-frontend` exists:
 
    ```bash
@@ -25,11 +25,14 @@ Keyboard shortcuts: `/` focuses search, `Space` toggles playback, `M` toggles mu
    ```
 
    Skip this if the network already exists.
-3. Build and start the app:
+3. Pull the published image and start the app:
 
    ```bash
-   docker compose up -d --build
+   docker compose pull
+   docker compose up -d
    ```
+
+The published image is `nevaran/radio-browser-plus` and currently targets `linux/amd64`.
 
 Compose attaches the app to `proxy-frontend` and does not publish port 8000 on the host. Configure your reverse proxy on that network to forward to `radio-browser-plus:8000` and terminate HTTPS there. For direct local access, uncomment the port mapping in `docker-compose.yml`.
 

@@ -88,7 +88,10 @@
 
 @media (pointer: coarse) and (hover: none) {
   :root {
-    --sab-min: 3rem;
+    /* Kept small on purpose: the floor is added to every bottom padding in
+       the app, and a bigger one stretched the now-playing bar into a tall
+       empty band on phones. Real insets still win through `max()`. */
+    --sab-min: 1.25rem;
   }
 }
 

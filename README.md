@@ -59,7 +59,7 @@ On an empty data directory, the server creates the default account `admin` / `ad
 
 ## Run from Source
 
-Requirements: Rust 1.98 or newer, Cargo, the `wasm32-unknown-unknown` target, and [Trunk](https://trunkrs.dev/).
+Requirements: Rust 1.98 or newer, Cargo, the `wasm32-unknown-unknown` target, and Trunk.
 
 Install the frontend toolchain if needed:
 

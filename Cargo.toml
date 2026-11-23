@@ -1,7 +1,7 @@
 [package]
 name = "radio_browser_plus"
 version = "1.0.0"
-edition = "2021"
+edition = "2024"
 authors = ["Radio Browser Plus"]
 description = "Rust backend for Radio Browser Plus web app"
 

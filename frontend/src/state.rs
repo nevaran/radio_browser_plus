@@ -842,13 +842,13 @@ impl AppState {
         self.view_error.set(None);
         self.loading.set(true);
         self.view_gen.update(|g| *g += 1);
-        let gen = self.view_gen.get_untracked();
+        let r#gen = self.view_gen.get_untracked();
         let this = self.clone();
         leptos::task::spawn_local(async move {
             this.load_view_inner().await;
             // Only the newest load clears the spinner; a superseded one
             // leaves it to its successor.
-            if this.current_gen(gen) {
+            if this.current_gen(r#gen) {
                 this.loading.set(false);
                 // A failed attempt used to strand the grid with nothing but
                 // a console message: retry while the user is still on this
@@ -858,7 +858,7 @@ impl AppState {
                     let retry = this.clone();
                     leptos::task::spawn_local(async move {
                         TimeoutFuture::new(RETRY_DELAY_MS).await;
-                        if retry.current_gen(gen) {
+                        if retry.current_gen(r#gen) {
                             retry.start_view_load(retries - 1);
                         }
                     });
@@ -889,12 +889,12 @@ impl AppState {
         self.view_error.set(None);
     }
 
-    fn current_gen(&self, gen: u64) -> bool {
-        self.view_gen.get_untracked() == gen
+    fn current_gen(&self, r#gen: u64) -> bool {
+        self.view_gen.get_untracked() == r#gen
     }
 
     async fn load_view_inner(&self) {
-        let gen = self.view_gen.get_untracked();
+        let r#gen = self.view_gen.get_untracked();
         let view = self.view.get_untracked();
         let filter = self.filter.get_untracked();
 
@@ -907,7 +907,7 @@ impl AppState {
             }
             match api::search_stations(&query).await {
                 Ok(stations) => {
-                    if self.current_gen(gen)
+                    if self.current_gen(r#gen)
                         && self.view.get_untracked() == "search"
                         && self.search_query.get_untracked() == query
                     {
@@ -915,7 +915,7 @@ impl AppState {
                         self.view_title.set(format!("Search: {query}"));
                     }
                 }
-                Err(e) => self.note_view_error(e, self.current_gen(gen)),
+                Err(e) => self.note_view_error(e, self.current_gen(r#gen)),
             }
             return;
         }
@@ -935,7 +935,7 @@ impl AppState {
                     if view == "genres" {
                         sort_by_name_asc(&mut stations, station_sort_key);
                     }
-                    if self.current_gen(gen) && self.filter.get_untracked().is_some() {
+                    if self.current_gen(r#gen) && self.filter.get_untracked().is_some() {
                         let title = match view.as_str() {
                             "genres" => "Genres".to_string(),
                             v => {
@@ -947,7 +947,7 @@ impl AppState {
                         self.view_title.set(format!("{title}: {filter_value}"));
                     }
                 }
-                Err(e) => self.note_view_error(e, self.current_gen(gen)),
+                Err(e) => self.note_view_error(e, self.current_gen(r#gen)),
             }
             return;
         }
@@ -955,7 +955,7 @@ impl AppState {
         match view.as_str() {
             "all" => {
                 self.show_station_list(
-                    gen,
+                    r#gen,
                     Some("all"),
                     "All stations",
                     true,
@@ -965,7 +965,7 @@ impl AppState {
             }
             "countries" => {
                 self.show_collections(
-                    gen,
+                    r#gen,
                     Some("countries"),
                     "countries",
                     "Countries",
@@ -975,7 +975,7 @@ impl AppState {
             }
             "languages" => {
                 self.show_collections(
-                    gen,
+                    r#gen,
                     Some("languages"),
                     "languages",
                     "Languages",
@@ -984,12 +984,12 @@ impl AppState {
                 .await
             }
             "tags" | "genres" => {
-                self.show_collections(gen, None, "genres", "Genres", api::fetch_genres())
+                self.show_collections(r#gen, None, "genres", "Genres", api::fetch_genres())
                     .await
             }
             "favorites" => {
                 self.ensure_favorites().await;
-                if self.current_gen(gen) && self.view.get_untracked() == "favorites" {
+                if self.current_gen(r#gen) && self.view.get_untracked() == "favorites" {
                     let mut stations: Vec<Station> = self
                         .favorites
                         .get_untracked()
@@ -1002,7 +1002,7 @@ impl AppState {
                 }
             }
             _ => {
-                self.show_station_list(gen, None, "Popular", false, api::fetch_popular())
+                self.show_station_list(r#gen, None, "Popular", false, api::fetch_popular())
                     .await
             }
         }
@@ -1013,7 +1013,7 @@ impl AppState {
     /// (`None` = generation check only, as before).
     async fn show_station_list(
         &self,
-        gen: u64,
+        r#gen: u64,
         expected_view: Option<&str>,
         title: &str,
         sort: bool,
@@ -1024,14 +1024,14 @@ impl AppState {
                 if sort {
                     sort_by_name_asc(&mut stations, station_sort_key);
                 }
-                let current = self.current_gen(gen)
+                let current = self.current_gen(r#gen)
                     && expected_view.is_none_or(|v| self.view.get_untracked() == v);
                 if current {
                     self.stations.set(stations);
                     self.view_title.set(title.to_string());
                 }
             }
-            Err(e) => self.note_view_error(e, self.current_gen(gen)),
+            Err(e) => self.note_view_error(e, self.current_gen(r#gen)),
         }
     }
 
@@ -1039,7 +1039,7 @@ impl AppState {
     /// still current. Same staleness contract as [`Self::show_station_list`].
     async fn show_collections<T: CollectionRow>(
         &self,
-        gen: u64,
+        r#gen: u64,
         expected_view: Option<&str>,
         kind: &str,
         title: &str,
@@ -1047,7 +1047,7 @@ impl AppState {
     ) {
         match fetch.await {
             Ok(items) => {
-                let current = self.current_gen(gen)
+                let current = self.current_gen(r#gen)
                     && expected_view.is_none_or(|v| self.view.get_untracked() == v);
                 if current {
                     let kind = kind.to_string();
@@ -1056,7 +1056,7 @@ impl AppState {
                     self.view_title.set(title.to_string());
                 }
             }
-            Err(e) => self.note_view_error(e, self.current_gen(gen)),
+            Err(e) => self.note_view_error(e, self.current_gen(r#gen)),
         }
     }
 
@@ -1084,11 +1084,11 @@ impl AppState {
         // the spinner and the error slot from here on.
         self.view_gen.update(|g| *g += 1);
         self.search_gen.update(|g| *g += 1);
-        let gen = self.search_gen.get_untracked();
+        let r#gen = self.search_gen.get_untracked();
         let this = self.clone();
         leptos::task::spawn_local(async move {
             TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
-            if this.search_gen.get_untracked() != gen {
+            if this.search_gen.get_untracked() != r#gen {
                 return;
             }
             match api::search_stations(&trimmed).await {
@@ -1099,12 +1099,12 @@ impl AppState {
                         this.stations.set(stations);
                         this.view_title.set(format!("Search: {trimmed}"));
                     }
-                    if this.search_gen.get_untracked() == gen {
+                    if this.search_gen.get_untracked() == r#gen {
                         this.loading.set(false);
                     }
                 }
                 Err(e) => {
-                    if this.search_gen.get_untracked() == gen {
+                    if this.search_gen.get_untracked() == r#gen {
                         this.loading.set(false);
                         this.note_view_error(e, true);
                     } else {

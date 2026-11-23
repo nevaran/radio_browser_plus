@@ -28,8 +28,7 @@ COPY src ./src
 # even when only building the backend package.
 COPY frontend ./frontend
 
-# Release Please can bump workspace manifests without syncing every local
-# package entry in Cargo.lock. Sync workspace entries, then lock dependencies.
+# Sync workspace package entries without changing dependency versions.
 RUN cargo update --workspace \
     && cargo build --release --locked
 

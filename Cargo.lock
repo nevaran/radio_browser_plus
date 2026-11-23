@@ -1748,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "radio_browser_plus"
-version = "1.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "bcrypt",

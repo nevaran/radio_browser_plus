@@ -95,12 +95,12 @@ impl Player {
     /// `stall_gen`; any data flow cancels it via `flow_tick`.
     fn arm_stall_watchdog(&self) {
         *self.stall_gen.lock().unwrap() += 1;
-        let gen = *self.stall_gen.lock().unwrap();
+        let r#gen = *self.stall_gen.lock().unwrap();
         let flow = *self.flow_tick.lock().unwrap();
         let this = self.clone();
         leptos::task::spawn_local(async move {
             TimeoutFuture::new(STALL_WINDOW_MS).await;
-            if *this.stall_gen.lock().unwrap() != gen {
+            if *this.stall_gen.lock().unwrap() != r#gen {
                 return;
             }
             if !this.wants_playing.get_untracked() {
@@ -330,11 +330,11 @@ impl Player {
         *self.retry_attempt.lock().unwrap() += 1;
         self.loading.set(true);
         *self.retry_gen.lock().unwrap() += 1;
-        let gen = *self.retry_gen.lock().unwrap();
+        let r#gen = *self.retry_gen.lock().unwrap();
         let this = self.clone();
         leptos::task::spawn_local(async move {
             TimeoutFuture::new(RETRY_DELAY_MS).await;
-            if *this.retry_gen.lock().unwrap() != gen || !this.wants_playing.get_untracked() {
+            if *this.retry_gen.lock().unwrap() != r#gen || !this.wants_playing.get_untracked() {
                 return;
             }
             let (audio_opt, station_opt) = (

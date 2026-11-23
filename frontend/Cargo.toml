@@ -1,7 +1,7 @@
 [package]
 name = "radio-browser-plus-frontend"
 version = "1.0.0"
-edition = "2021"
+edition = "2024"
 description = "Leptos WebAssembly frontend for Radio Browser Plus (CSR, talks to the Axum JSON API)"
 
 [dependencies]

@@ -34,6 +34,8 @@ Keyboard shortcuts: `/` focuses search, `Space` toggles playback, `M` toggles mu
 
 The published image is `nevaran/radio-browser-plus` and currently only targets `linux/amd64`.
 
+To publish a Docker image, change the version in `DOCKER_VERSION` and push that change to `main`. The **Publish Docker image** workflow builds the current source and pushes both the versioned tag and `latest`. This Docker image version is independent of the Rust crate versions in `Cargo.toml` and `frontend/Cargo.toml`; those files do not control the Docker tags.
+
 Compose attaches the app to `proxy-frontend` and does not publish port 8000 on the host. Configure your reverse proxy on that network to forward to `radio-browser-plus:8000` and terminate HTTPS there. For direct local access, uncomment the port mapping in `docker-compose.yml`.
 
 The `./data` directory is mounted at `/app/data` and persists users, sessions, favorites, and the optional activity log. The container runs as a non-root user, drops Linux capabilities, and uses a read-only root filesystem.

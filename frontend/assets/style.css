@@ -1435,6 +1435,44 @@ a:focus-visible,
   border-color: rgba(52, 211, 153, 0.35);
 }
 
+/* Server-failover marker: the station's origin was unreachable from the
+   browser (ISP/region block), so its stream/artwork is relayed by the
+   server. Glossy purple dot in the card's lower-right corner. */
+.failover-dot {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 3;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0) 36%),
+    radial-gradient(circle at 50% 50%, #e9d5ff 0%, #a855f7 46%, #7c3aed 78%, #4c1d95 100%);
+  border: 1px solid rgba(233, 213, 255, 0.65);
+  box-shadow:
+    0 0 0 2px rgba(76, 29, 149, 0.32),
+    0 2px 10px rgba(168, 85, 247, 0.8),
+    inset 0 1px 1px rgba(255, 255, 255, 0.85);
+  animation: failover-glow 2.6s ease-in-out infinite;
+}
+
+@keyframes failover-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 0 2px rgba(76, 29, 149, 0.32),
+      0 2px 10px rgba(168, 85, 247, 0.65),
+      inset 0 1px 1px rgba(255, 255, 255, 0.85);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px rgba(124, 58, 237, 0.45),
+      0 2px 16px rgba(192, 132, 252, 0.95),
+      inset 0 1px 1px rgba(255, 255, 255, 0.95);
+  }
+}
+
 /* "Playing" marker on the active card */
 .playing-pill {
   position: absolute;
@@ -1574,6 +1612,11 @@ a:focus-visible,
   min-width: 0;
 }
 
+/* Keep the failover dot clear of the meta text on its card. */
+.station-card.failover .station-meta {
+  padding-right: 1.1rem;
+}
+
 .station-meta-text {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1590,7 +1633,7 @@ a:focus-visible,
   background: var(--surface-2);
 }
 
-/* --- incremental grid footer ("Showing X of N" + Load more) --- */
+/* --- incremental grid footer --- */
 
 .grid-footer {
   grid-column: 1 / -1;
@@ -1609,12 +1652,6 @@ a:focus-visible,
   font-size: 0.84rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-}
-
-.grid-footer .secondary-button {
-  padding: 0.55rem 1.1rem;
-  font-size: 0.85rem;
-  flex-shrink: 0;
 }
 
 /* Empty reserved height for not-yet-mounted rows: keeps the scrollbar at

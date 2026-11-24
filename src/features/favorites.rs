@@ -38,6 +38,19 @@ impl FavoritesHandlers {
         Ok(repo)
     }
 
+    pub async fn saved_favorite(
+        &self,
+        headers: &HeaderMap,
+        station_id: &str,
+    ) -> Result<Option<Favorite>> {
+        let repo = match self.repo_for_headers(headers).await {
+            Ok(repo) => repo,
+            Err(AppError::Unauthorized(_)) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        Ok(repo.load_all().await?.as_map().get(station_id).cloned())
+    }
+
     /// GET /api/favorites - Get all favorites for the current user
     pub async fn list(&self, headers: HeaderMap) -> Result<axum::Json<FavoritesResponse>> {
         debug!("Listing favorites for authenticated user");
@@ -53,6 +66,28 @@ impl FavoritesHandlers {
     const MAX_FAVORITES_PER_USER: usize = 2000;
 
     fn check_favorite(favorite: &Favorite) -> Result<()> {
+        for raw_url in [
+            favorite.url.as_deref(),
+            favorite.url_resolved.as_deref(),
+            favorite.favicon.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if raw_url.trim().is_empty() {
+                continue;
+            }
+            let url = reqwest::Url::parse(raw_url)
+                .map_err(|_| AppError::BadRequest("Favorite URL is invalid".to_string()))?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.username() != ""
+                || url.password().is_some()
+            {
+                return Err(AppError::BadRequest(
+                    "Favorite URLs must be HTTP(S) URLs without credentials".to_string(),
+                ));
+            }
+        }
         let invalid = favorite.station_id.is_empty()
             || favorite.station_id.len() > 128
             || favorite.name.chars().count() > 500
@@ -66,6 +101,10 @@ impl FavoritesHandlers {
                 .country
                 .as_deref()
                 .is_some_and(|c| c.chars().count() > 200)
+            || favorite
+                .countrycode
+                .as_deref()
+                .is_some_and(|code| code.len() > 16)
             || favorite
                 .genre
                 .as_deref()

@@ -4,7 +4,7 @@
 //! the backend is sent, exactly like the previous `fetch(..., { credentials:
 //! 'same-origin' })` calls.
 
-use gloo_net::http::Request;
+use gloo_net::http::{Request, RequestBuilder, Response};
 use serde::{de::DeserializeOwned, Serialize};
 use web_sys::RequestCredentials;
 
@@ -13,9 +13,19 @@ use crate::models::{
     User,
 };
 
+fn with_same_origin_credentials(request: RequestBuilder) -> RequestBuilder {
+    request.credentials(RequestCredentials::SameOrigin)
+}
+
+async fn decode_json<T: DeserializeOwned>(response: Response) -> Result<T, String> {
+    response
+        .json()
+        .await
+        .map_err(|e| format!("Bad response: {e}"))
+}
+
 async fn get_json<T: DeserializeOwned>(path: &str) -> Result<T, String> {
-    let response = Request::get(path)
-        .credentials(RequestCredentials::SameOrigin)
+    let response = with_same_origin_credentials(Request::get(path))
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -25,17 +35,14 @@ async fn get_json<T: DeserializeOwned>(path: &str) -> Result<T, String> {
         }
         return Err(format!("Request failed: {}", response.status()));
     }
-    response
-        .json()
-        .await
-        .map_err(|e| format!("Bad response: {e}"))
+    decode_json(response).await
 }
 
 async fn post_json<B: Serialize, T: DeserializeOwned>(path: &str, body: &B) -> Result<T, String> {
-    let response = Request::post(path)
-        .credentials(RequestCredentials::SameOrigin)
+    let request = with_same_origin_credentials(Request::post(path))
         .json(body)
-        .map_err(|e| format!("Bad request: {e}"))?
+        .map_err(|e| format!("Bad request: {e}"))?;
+    let response = request
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -49,25 +56,18 @@ async fn post_json<B: Serialize, T: DeserializeOwned>(path: &str, body: &B) -> R
             .unwrap_or_else(|| format!("Request failed: {status}"));
         return Err(message);
     }
-    response
-        .json()
-        .await
-        .map_err(|e| format!("Bad response: {e}"))
+    decode_json(response).await
 }
 
 async fn post_empty(path: &str) -> Result<serde_json::Value, String> {
-    let response = Request::post(path)
-        .credentials(RequestCredentials::SameOrigin)
+    let response = with_same_origin_credentials(Request::post(path))
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
     if !response.ok() {
         return Err(format!("Request failed: {}", response.status()));
     }
-    response
-        .json()
-        .await
-        .map_err(|e| format!("Bad response: {e}"))
+    decode_json(response).await
 }
 
 fn encode(value: &str) -> String {
@@ -91,10 +91,6 @@ pub async fn fetch_all_stations() -> Result<Vec<Station>, String> {
 
 pub async fn fetch_popular() -> Result<Vec<Station>, String> {
     get_json("/api/popular").await
-}
-
-pub async fn search_stations(query: &str) -> Result<Vec<Station>, String> {
-    get_json(&format!("/api/search?q={}", encode(query))).await
 }
 
 pub async fn fetch_stations_by_country(country: &str) -> Result<Vec<Station>, String> {

@@ -31,7 +31,7 @@ use radio_browser_plus::{
     error::Result,
     features::{
         stations::{PaginationParams, SearchParams, StationsQueryParams},
-        CollectionsHandlers, FavoritesHandlers, HealthHandlers, StationsHandlers,
+        CollectionsHandlers, FailoverHandlers, FavoritesHandlers, HealthHandlers, StationsHandlers,
     },
     infra::RadioBrowserClient,
 };
@@ -95,10 +95,19 @@ async fn main() {
     // Initialize handlers
     let stations = Arc::new(StationsHandlers::new(radio_client.clone()));
     let favorites = Arc::new(FavoritesHandlers::new(&data_dir, auth.clone()));
-    let collections = Arc::new(CollectionsHandlers::new(radio_client));
+    let collections = Arc::new(CollectionsHandlers::new(radio_client.clone()));
+    let failover = Arc::new(FailoverHandlers::new(radio_client, favorites.clone()));
     let health = Arc::new(HealthHandlers::new());
 
-    let app = build_router(allow_guest, auth, stations, favorites, collections, health);
+    let app = build_router(
+        allow_guest,
+        auth,
+        stations,
+        favorites,
+        collections,
+        failover,
+        health,
+    );
 
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
@@ -124,6 +133,7 @@ fn build_router(
     stations: Arc<StationsHandlers>,
     favorites: Arc<FavoritesHandlers>,
     collections: Arc<CollectionsHandlers>,
+    failover: Arc<FailoverHandlers>,
     health: Arc<HealthHandlers>,
 ) -> Router {
     let api = Router::new()
@@ -131,6 +141,7 @@ fn build_router(
         .merge(collection_routes(collections))
         .merge(auth_routes(auth.clone()))
         .merge(favorite_routes(favorites))
+        .merge(failover_routes(failover))
         .merge(config_routes(allow_guest))
         // Unknown API paths must not fall through to the SPA shell: answer
         // with JSON 404 so API clients (and scanners) get a clear signal.
@@ -230,6 +241,15 @@ fn favorite_routes(handlers: Arc<FavoritesHandlers>) -> Router {
         .route("/api/favorites", get(list_favorites))
         .route("/api/favorites/toggle", post(toggle_favorite))
         .route("/api/favorites/update", post(update_favorite))
+        .with_state(handlers)
+}
+
+/// Server-side relay for station streams/artwork, used when the browser's
+/// direct connection to the station origin is blocked (ISP or region).
+fn failover_routes(handlers: Arc<FailoverHandlers>) -> Router {
+    Router::new()
+        .route("/api/stations/{id}/stream", get(proxy_station_stream))
+        .route("/api/stations/{id}/art", get(proxy_station_art))
         .with_state(handlers)
 }
 
@@ -365,6 +385,22 @@ async fn update_favorite(
     body: Json<UpdateFavoriteRequest>,
 ) -> Result<Json<FavoritesResponse>> {
     f.update(headers, body).await
+}
+
+async fn proxy_station_stream(
+    State(f): State<Arc<FailoverHandlers>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    f.stream(headers, id).await
+}
+
+async fn proxy_station_art(
+    State(f): State<Arc<FailoverHandlers>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    f.art(headers, id).await
 }
 
 async fn runtime_config(State(allow_guest): State<bool>) -> impl IntoResponse {

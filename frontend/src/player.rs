@@ -16,6 +16,7 @@
 //! new one fires its first `playing` event, and `is_playing` stays true
 //! throughout, so there is neither a silence gap nor a play-button flicker.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use gloo_storage::{LocalStorage, Storage};
@@ -25,7 +26,8 @@ use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::HtmlAudioElement;
 
-use crate::models::{station_stream_url, Station};
+use crate::models::{station_id, station_stream_url, Station};
+use crate::utils::station_proxy_stream_url;
 
 const VOLUME_KEY: &str = "radio-browser-plus-volume";
 const MUTED_KEY: &str = "radio-browser-plus-muted";
@@ -56,10 +58,16 @@ pub struct Player {
     flow_tick: Arc<Mutex<u64>>,
     /// Generation counter ensuring a single stall watchdog at a time.
     stall_gen: Arc<Mutex<u64>>,
+    /// True once the current station has been switched from its direct origin
+    /// to the same-origin server proxy (reset for every newly played station).
+    failover_active: Arc<Mutex<bool>>,
+    /// Session-wide set of stations that needed the proxy (stream or artwork)
+    /// so their cards can show the failover marker.
+    failover: RwSignal<HashSet<String>>,
 }
 
 impl Player {
-    pub fn new() -> Self {
+    pub fn new(failover: RwSignal<HashSet<String>>) -> Self {
         let saved_volume: f64 = LocalStorage::get(VOLUME_KEY).unwrap_or(1.0);
         let muted: bool = LocalStorage::get(MUTED_KEY).unwrap_or(false);
         Self {
@@ -75,6 +83,8 @@ impl Player {
             retry_gen: Arc::new(Mutex::new(0)),
             flow_tick: Arc::new(Mutex::new(0)),
             stall_gen: Arc::new(Mutex::new(0)),
+            failover_active: Arc::new(Mutex::new(false)),
+            failover,
         }
     }
 
@@ -85,6 +95,55 @@ impl Player {
 
     fn note_flow(&self) {
         *self.flow_tick.lock().unwrap() += 1;
+    }
+
+    /// Whether `element` is still the adopted audio element. A failure from a
+    /// superseded element (the user switched stations meanwhile) must not
+    /// touch the new station's playback, nor trigger its failover.
+    fn is_adopted(&self, element: &HtmlAudioElement) -> bool {
+        self.audio
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|current| current == element)
+    }
+
+    fn using_failover(&self) -> bool {
+        *self.failover_active.lock().unwrap()
+    }
+
+    fn reset_stream_source(&self) {
+        *self.failover_active.lock().unwrap() = false;
+    }
+
+    /// Direct origin URL first; once it failed, the same-origin server proxy
+    /// (always reachable through the app) takes over.
+    fn stream_url_for(&self, station: &Station) -> Option<String> {
+        if self.using_failover() {
+            station_proxy_stream_url(station).or_else(|| station_stream_url(station))
+        } else {
+            station_stream_url(station)
+        }
+    }
+
+    /// Switch the current station onto the server proxy. Returns true only for
+    /// the first switch, so the caller reloads immediately instead of retrying
+    /// the origin the browser/network is evidently unable to reach.
+    fn activate_failover(&self) -> bool {
+        if self.using_failover() {
+            return false;
+        }
+        let Some(station) = self.current.get_untracked() else {
+            return false;
+        };
+        let Some(id) = station_id(&station) else {
+            return false;
+        };
+        *self.failover_active.lock().unwrap() = true;
+        self.failover.update(|set| {
+            set.insert(id);
+        });
+        true
     }
 
     /// Watch for a silent stall (no data flow, no error event — the classic
@@ -123,7 +182,9 @@ impl Player {
     pub fn reconnect(&self) {
         if self.wants_playing.get_untracked() && self.current.get_untracked().is_some() {
             self.cancel_retry();
-            self.schedule_retry();
+            // Connectivity returned: keep the current source mode and try
+            // again, without forcing a proxy switch that only failures earn.
+            self.schedule_retry_after_delay();
         }
     }
 
@@ -157,15 +218,16 @@ impl Player {
 
     /// Load a station into the player controls without starting playback.
     pub fn load_station(&self, station: Station) {
-        let Some(stream) = station_stream_url(&station) else {
+        self.cancel_retry();
+        self.disarm_stall_watchdog();
+        self.reset_stream_source();
+        let Some(stream) = self.stream_url_for(&station) else {
             return;
         };
         let Ok(audio) = HtmlAudioElement::new_with_src(&stream) else {
             return;
         };
 
-        self.cancel_retry();
-        self.disarm_stall_watchdog();
         self.teardown_previous();
         if let Some(current) = self.audio.lock().unwrap().take() {
             Self::silence(&current);
@@ -185,11 +247,12 @@ impl Player {
 
     pub fn play(&self, station: Station) {
         self.cancel_retry();
+        self.reset_stream_source();
         // Fresh baseline; the watchdog arms below and cancels itself on flow.
         self.note_flow();
         self.arm_stall_watchdog();
 
-        let Some(stream) = station_stream_url(&station) else {
+        let Some(stream) = self.stream_url_for(&station) else {
             return;
         };
         let audio = match HtmlAudioElement::new_with_src(&stream) {
@@ -223,6 +286,7 @@ impl Player {
         self.attach_handlers(&audio);
 
         let this = self.clone();
+        let element = audio.clone();
         leptos::task::spawn_local(async move {
             let failed = match audio.play() {
                 Ok(promise) => JsFuture::from(promise).await.is_err(),
@@ -231,7 +295,9 @@ impl Player {
             if failed {
                 this.teardown_previous();
                 this.is_playing.set(false);
-                this.schedule_retry();
+                if this.is_adopted(&element) {
+                    this.schedule_retry();
+                }
             }
         });
     }
@@ -322,6 +388,18 @@ impl Player {
             self.loading.set(false);
             return;
         }
+        // A direct-source failure means the browser's own route to the
+        // station is unusable (ISP block, region lock, dead origin): switch to
+        // the server proxy right away instead of burning another retry on it.
+        if self.activate_failover() {
+            *self.retry_attempt.lock().unwrap() = 0;
+            self.reload_current();
+            return;
+        }
+        self.schedule_retry_after_delay();
+    }
+
+    fn schedule_retry_after_delay(&self) {
         if *self.retry_attempt.lock().unwrap() >= MAX_RETRIES {
             *self.retry_attempt.lock().unwrap() = 0;
             self.loading.set(false);
@@ -337,25 +415,39 @@ impl Player {
             if *this.retry_gen.lock().unwrap() != r#gen || !this.wants_playing.get_untracked() {
                 return;
             }
-            let (audio_opt, station_opt) = (
-                this.audio.lock().unwrap().clone(),
-                this.current.get_untracked(),
-            );
-            let (Some(audio), Some(station)) = (audio_opt, station_opt) else {
-                this.loading.set(false);
-                return;
-            };
-            let Some(stream) = station_stream_url(&station) else {
-                this.loading.set(false);
-                return;
-            };
-            audio.set_src(&stream);
+            this.reload_current();
+        });
+    }
+
+    /// Reload the adopted element from the source mode currently in effect
+    /// (direct or server-proxied) and resume playback.
+    fn reload_current(&self) {
+        let (audio_opt, station_opt) = (
+            self.audio.lock().unwrap().clone(),
+            self.current.get_untracked(),
+        );
+        let (Some(audio), Some(station)) = (audio_opt, station_opt) else {
+            self.loading.set(false);
+            return;
+        };
+        let Some(stream) = self.stream_url_for(&station) else {
+            self.loading.set(false);
+            return;
+        };
+        self.loading.set(true);
+        audio.set_src(&stream);
+        let this = self.clone();
+        let element = audio.clone();
+        leptos::task::spawn_local(async move {
             let failed = match audio.play() {
                 Ok(promise) => JsFuture::from(promise).await.is_err(),
                 Err(_) => true,
             };
             if failed {
-                this.schedule_retry();
+                this.is_playing.set(false);
+                if this.is_adopted(&element) {
+                    this.schedule_retry();
+                }
             } else {
                 this.is_playing.set(true);
                 this.note_flow();
@@ -389,6 +481,7 @@ impl Player {
         // The element may be mid-starve: arm the watchdog (exits fast on flow).
         self.arm_stall_watchdog();
         let this = self.clone();
+        let element = audio.clone();
         leptos::task::spawn_local(async move {
             let failed = match audio.play() {
                 Ok(promise) => JsFuture::from(promise).await.is_err(),
@@ -396,7 +489,9 @@ impl Player {
             };
             if failed {
                 this.is_playing.set(false);
-                this.schedule_retry();
+                if this.is_adopted(&element) {
+                    this.schedule_retry();
+                }
             } else {
                 this.is_playing.set(true);
             }

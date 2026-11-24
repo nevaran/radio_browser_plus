@@ -73,9 +73,9 @@ fn CollectionCard(item: CollectionItem) -> impl IntoView {
 pub fn CollectionGrid() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState provided");
     let visible = state.clone();
+    let has_items = state.clone();
     let listed = state.clone();
-    let totals = state.clone();
-    let foot_store = StoredValue::new(state.clone());
+    let grid_limit = state.grid_limit;
     let err_store = StoredValue::new(state.clone());
     let spacer_state = state.clone();
     let spacer_px = state.clone();
@@ -84,26 +84,38 @@ pub fn CollectionGrid() -> impl IntoView {
     Effect::new(move |_| {
         spacer_state.grid_limit.get();
         let _ = spacer_state.collections.with(|rows| rows.len());
+        let _ = spacer_state.search_query.get();
         spacer_state.resize_tick.get();
         spacer_state.update_spacer();
     });
 
     // Same windowing as the station grid: mount only the visible page.
+    let collection_list = Memo::new(move |_| listed.display_collections());
     let items = Memo::new(move |_| {
-        let mut list = listed.collections.get();
-        list.truncate(listed.grid_limit.get());
+        let mut list = collection_list.get();
+        list.truncate(grid_limit.get());
         list
     });
 
     view! {
         <Show
             // Same stale-while-revalidate contract as the station grid.
-            when=move || !visible.collections.get().is_empty()
+            when=move || {
+                has_items.visible_collection_count() > 0
+            }
             fallback=move || {
                 if visible.loading.get() {
                     view! { <GridSkeleton /> }.into_any()
                 } else if let Some(message) = visible.view_error.get() {
                     error_state(message, err_store)
+                } else if !visible.search_query.get().is_empty() {
+                    empty_state(
+                        empty_icon("search"),
+                        "No items matched".to_string(),
+                        "Try another search or clear the search field to see the full list."
+                            .to_string(),
+                        None,
+                    )
                 } else {
                     empty_state(
                         empty_icon("globe"),
@@ -124,22 +136,13 @@ pub fn CollectionGrid() -> impl IntoView {
                 </For>
                 {move || {
                     let shown = items.get().len();
-                    let total = totals.collections.get().len();
+                    let total = collection_list.get().len();
                     if shown < total {
                         view! {
                             <div class="grid-footer">
                                 <span class="grid-count">
                                     {format!("Showing {shown} of {total}")}
                                 </span>
-                                <button
-                                    type="button"
-                                    class="secondary-button"
-                                    on:click=move |_| {
-                                        foot_store.with_value(|s| s.show_more());
-                                    }
-                                >
-                                    "Load more"
-                                </button>
                             </div>
                         }
                             .into_any()

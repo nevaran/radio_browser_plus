@@ -9,12 +9,12 @@
 * `src/domain.rs` serde models for the upstream radio-browser.info API and the app's JSON responses
 * `src/error.rs` `AppError` (thiserror) and `Result<T>`; `IntoResponse` maps variants to status + `{"error": msg}`
 * `src/auth.rs` (tests in sibling `src/auth/tests.rs`) `AuthService`: users, sessions, guest sessions, bcrypt, cookie auth, presence tracking, activity log
-* `src/features/` one handler service per area: `stations.rs`, `collections.rs`, `favorites.rs`, `health.rs`
+* `src/features/` one handler service per area: `stations.rs`, `collections.rs`, `favorites.rs`, `failover.rs` (server-side stream/artwork relay), `health.rs`
 * `src/infra/` stateful adapters: `radio_browser_client.rs` (reqwest to the upstream API), `favorites_repository.rs` (per-user JSON persistence)
 * `src/genres.rs` curated genre catalog (`CanonicalGenre`, `VARIETY_GENRE` catch-all)
 * `frontend/` Leptos 0.8 CSR WebAssembly SPA (`radio-browser-plus-frontend`, wasm-only)
   * `frontend/src/app.rs` root component, keyboard shortcuts, heartbeat interval
-  * `frontend/src/state.rs` all shared reactive state (`RwSignal`) plus data loading: generation counters, retries, debounce, localStorage
+  * `frontend/src/state.rs` all shared reactive state (`RwSignal`) plus data loading and local-list search: station names by default, or comma-separated `tag:` terms matched against station tags
   * `frontend/src/api.rs` typed `gloo-net` client for `/api/*` and `/health`
   * `frontend/src/models.rs` response/request types mirrored from `src/domain.rs`
   * `frontend/src/player.rs` `HtmlAudioElement` streaming, volume, reconnect
@@ -80,6 +80,7 @@
   4. response type mirrored in `frontend/src/models.rs`, typed call in `frontend/src/api.rs`;
   5. consumed from `state.rs` or a component via `leptos::task::spawn_local`.
 * Async in components runs on `leptos::task::spawn_local`. Stale-response discarding uses generation counters, not `AbortController` (see the `state.rs` header comment).
+* The search box filters the active list locally: station results match names unless the query starts with `tag:`; comma-separated terms after the prefix match any comma-separated station tag. Country, language, and genre lists match their displayed labels and filter values.
 * All shared reactive state lives in `state.rs` as `RwSignal` fields on `AppState`; components take slices of it. Do not invent module-level mutable globals in components.
 * Grids render incrementally (infinite scroll, `GRID_PAGE` page size) because the backend can return thousands of stations; do not render unbounded lists.
 * In-app confirmation/alerts go through the `AppDialog` signal and `Dialog` component — do not reintroduce browser-native `alert()`/`confirm()`.

@@ -28,11 +28,9 @@ COPY src ./src
 # even when only building the backend package.
 COPY frontend ./frontend
 
-# Sync workspace package entries without changing dependency versions.
-RUN cargo update --workspace \
-    && cargo build --release --locked
+RUN cargo build --release --locked
 
-FROM alpine:latest AS runtime
+FROM alpine:3.24.4 AS runtime
 
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
 RUN addgroup -S app && adduser -S -G app app

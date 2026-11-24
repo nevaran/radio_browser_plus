@@ -1,12 +1,24 @@
 // HTTP client for radio-browser.info API
 use crate::domain::{Country, Language, Station, Tag};
 use crate::error::{AppError, Result};
-use reqwest::Client;
+use reqwest::{redirect, Client};
+use std::net::{IpAddr, Ipv4Addr};
+use tokio::net::lookup_host;
 use tracing::debug;
+
+/// Max accepted upstream JSON body: comfortably above the largest capped
+/// station list, far below memory-exhaustion territory.
+const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// Max accepted artwork body for the failover proxy: station covers are small.
+const MAX_ART_BODY_BYTES: usize = 3 * 1024 * 1024;
+const MAX_PROXY_REDIRECTS: usize = 10;
+/// Some station servers reject requests without one.
+const STREAM_USER_AGENT: &str = "RadioBrowserPlus/1.0";
 
 #[derive(Clone)]
 pub struct RadioBrowserClient {
     client: Client,
+    proxy_client: Client,
     base_url: String,
 }
 
@@ -14,6 +26,10 @@ impl RadioBrowserClient {
     pub fn new(base_url: Option<String>) -> Self {
         Self {
             client: Client::new(),
+            proxy_client: Client::builder()
+                .redirect(redirect::Policy::none())
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             base_url: base_url
                 .unwrap_or_else(|| "https://de1.api.radio-browser.info/json".to_string()),
         }
@@ -154,7 +170,7 @@ impl RadioBrowserClient {
     /// Get all countries
     pub async fn get_countries(&self) -> Result<Vec<Country>> {
         debug!("Fetching countries");
-        let url = format!("{}/countries?limit=200", self.base_url);
+        let url = format!("{}/countries?limit=1000", self.base_url);
         self.fetch_json_array(&url).await
     }
 
@@ -177,6 +193,101 @@ impl RadioBrowserClient {
             self.base_url
         );
         self.fetch_json_array(&url).await
+    }
+
+    /// Resolve a station's stream target from the directory, without
+    /// contacting the station.
+    pub async fn station_stream_url(&self, station_id: &str) -> Result<reqwest::Url> {
+        let station = self.get_station_by_id(station_id).await?;
+        resolve_stream_target(&station)
+    }
+
+    /// Open a stream URL server-side for the failover proxy. Deliberately
+    /// separate from the JSON helpers: the body is unbounded (a radio stream
+    /// never "finishes") and no total timeout is applied after the request is
+    /// established.
+    pub async fn open_stream(&self, raw_url: &str) -> Result<reqwest::Response> {
+        let url = http_url(raw_url)?;
+        debug!(url = %url, "Proxying station stream");
+        self.proxy_get(url, None).await
+    }
+
+    /// Resolve a station's artwork URL from the directory, without fetching
+    /// it.
+    pub async fn station_art_url(&self, station_id: &str) -> Result<reqwest::Url> {
+        let station = self.get_station_by_id(station_id).await?;
+        let raw = station
+            .favicon
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| AppError::NotFound("Station has no artwork".to_string()))?;
+        http_url(raw)
+    }
+
+    /// Fetch artwork server-side for the failover proxy. The caller supplies
+    /// a URL resolved from the directory or a validated saved favorite.
+    pub async fn fetch_art(&self, raw_url: &str) -> Result<(Vec<u8>, Option<String>)> {
+        let url = http_url(raw_url)?;
+        debug!(url = %url, "Proxying station artwork");
+        let response = self
+            .proxy_get(url, Some(std::time::Duration::from_secs(15)))
+            .await?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| is_safe_image_type(value))
+            .map(str::to_owned);
+        let bytes = Self::read_capped_bytes(response, MAX_ART_BODY_BYTES).await?;
+        Ok((bytes, content_type))
+    }
+
+    async fn proxy_get(
+        &self,
+        mut url: reqwest::Url,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<reqwest::Response> {
+        let mut redirects = 0;
+        loop {
+            validate_public_url(&url).await?;
+            let mut request = self
+                .proxy_client
+                .get(url.clone())
+                .header(reqwest::header::USER_AGENT, STREAM_USER_AGENT);
+            if let Some(timeout) = timeout {
+                request = request.timeout(timeout);
+            }
+            let response = request.send().await?;
+            if response.status().is_redirection() {
+                if redirects >= MAX_PROXY_REDIRECTS {
+                    return Err(AppError::ExternalServiceError(
+                        "Station server redirected too many times".to_string(),
+                    ));
+                }
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| {
+                        AppError::ExternalServiceError(
+                            "Station server returned an invalid redirect".to_string(),
+                        )
+                    })?;
+                let next = redirect_target(response.url(), location)?;
+                drop(response);
+                url = http_url(next.as_str())?;
+                redirects += 1;
+                continue;
+            }
+            if !response.status().is_success() {
+                return Err(AppError::ExternalServiceError(format!(
+                    "Station server error: {}",
+                    response.status()
+                )));
+            }
+            return Ok(response);
+        }
     }
 
     // Private helper method
@@ -218,32 +329,35 @@ impl RadioBrowserClient {
         &path[..end]
     }
 
+    /// Read a response body as UTF-8 under the JSON body cap.
+    async fn read_capped_text(response: reqwest::Response) -> Result<String> {
+        let buf = Self::read_capped_bytes(response, MAX_BODY_BYTES).await?;
+        String::from_utf8(buf).map_err(|e| {
+            AppError::ExternalServiceError(format!("Radio browser API returned invalid UTF-8: {e}"))
+        })
+    }
+
     /// Read a response body with an upper bound so a misbehaving upstream
     /// cannot exhaust server memory, no matter the Content-Length it claims.
-    async fn read_capped_text(response: reqwest::Response) -> Result<String> {
-        /// Max accepted upstream body: comfortably above the largest capped
-        /// station list, far below memory-exhaustion territory.
-        const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
-        if let Some(len) = response.content_length() {
-            if len > MAX_BODY_BYTES as u64 {
-                return Err(AppError::ExternalServiceError(format!(
-                    "Radio browser API response too large: {len} bytes"
-                )));
-            }
+    async fn read_capped_bytes(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+        if let Some(len) = response.content_length()
+            && len > max_bytes as u64
+        {
+            return Err(AppError::ExternalServiceError(format!(
+                "Upstream response too large: {len} bytes"
+            )));
         }
         let mut response = response;
         let mut buf = Vec::new();
         while let Some(chunk) = response.chunk().await? {
-            if buf.len() + chunk.len() > MAX_BODY_BYTES {
+            if buf.len() + chunk.len() > max_bytes {
                 return Err(AppError::ExternalServiceError(
-                    "Radio browser API response too large".to_string(),
+                    "Upstream response too large".to_string(),
                 ));
             }
             buf.extend_from_slice(&chunk);
         }
-        String::from_utf8(buf).map_err(|e| {
-            AppError::ExternalServiceError(format!("Radio browser API returned invalid UTF-8: {e}"))
-        })
+        Ok(buf)
     }
 }
 
@@ -253,6 +367,121 @@ fn limit_query(limit: u32) -> String {
     } else {
         format!("&limit={}", limit)
     }
+}
+
+/// Only raster images are relayed: an upstream SVG opened directly could run
+/// script on the app origin, so those fall back to the default image type.
+fn is_safe_image_type(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("image/") && !value.starts_with("image/svg")
+}
+
+/// Parse an upstream-provided station URL, refusing anything but HTTP(S) so
+/// the proxy can never be pointed at `file:`/`data:` or similar schemes.
+fn http_url(raw: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw)
+        .map_err(|_| AppError::BadRequest("Station URL is invalid".to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest(
+            "Only http and https station URLs can be proxied".to_string(),
+        ));
+    }
+    if url.username() != "" || url.password().is_some() {
+        return Err(AppError::BadRequest(
+            "Station URLs must not contain credentials".to_string(),
+        ));
+    }
+    Ok(url)
+}
+
+fn redirect_target(current: &reqwest::Url, location: &str) -> Result<reqwest::Url> {
+    let next = current.join(location).map_err(|_| {
+        AppError::ExternalServiceError("Station server returned an invalid redirect".to_string())
+    })?;
+    http_url(next.as_str()).map_err(|_| {
+        AppError::ExternalServiceError("Station server returned an invalid redirect".to_string())
+    })
+}
+
+async fn validate_public_url(url: &reqwest::Url) -> Result<()> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| AppError::BadRequest("Station URL has no host".to_string()))?;
+    let port = url.port_or_known_default().unwrap_or(80);
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_non_public_ip(ip) {
+            return Err(AppError::BadRequest(
+                "Private or local station addresses are not allowed".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let addresses = lookup_host((host, port))
+        .await
+        .map_err(|_| AppError::BadRequest("Station host could not be resolved".to_string()))?;
+    let mut resolved = false;
+    for address in addresses {
+        resolved = true;
+        if is_non_public_ip(address.ip()) {
+            return Err(AppError::BadRequest(
+                "Private or local station addresses are not allowed".to_string(),
+            ));
+        }
+    }
+    if !resolved {
+        return Err(AppError::BadRequest(
+            "Station host could not be resolved".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_non_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_non_public_ipv4(ip),
+        IpAddr::V6(ip) => {
+            if let Some(ip) = ip.to_ipv4_mapped() {
+                return is_non_public_ipv4(ip);
+            }
+            ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_multicast()
+                || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0xdb8)
+        }
+    }
+}
+
+fn is_non_public_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || octets[0] == 0
+        || octets[0] == 100 && (64..=127).contains(&octets[1])
+        || octets[0] == 192 && octets[1] == 0 && octets[2] == 0
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+        || (octets[0] == 198 && octets[1] == 18)
+        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+        || (octets[0] >= 240)
+}
+
+/// Prefer the resolved stream URL (redirects already followed by the
+/// directory) and fall back to the raw one.
+fn resolve_stream_target(station: &Station) -> Result<reqwest::Url> {
+    let raw = [station.url_resolved.as_deref(), station.url.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|url| !url.is_empty())
+        .ok_or_else(|| AppError::NotFound("Station has no stream URL".to_string()))?;
+    http_url(raw)
 }
 
 /// Identity of a station for dedupe: upstream UUID, falling back to
@@ -385,5 +614,76 @@ mod tests {
         assert!(names.contains(&"Радио Рекорд".to_string()));
         assert!(names.contains(&"Наше Радио".to_string()));
         assert_eq!(names.len(), 4);
+    }
+
+    #[test]
+    fn stream_target_prefers_resolved_url() {
+        let mut station = test_station("s1", "S1", 0);
+        station.url = Some("http://raw.example/stream".to_string());
+        station.url_resolved = Some("  https://resolved.example/live  ".to_string());
+        assert_eq!(
+            resolve_stream_target(&station).unwrap().as_str(),
+            "https://resolved.example/live"
+        );
+
+        station.url_resolved = Some("   ".to_string());
+        assert_eq!(
+            resolve_stream_target(&station).unwrap().as_str(),
+            "http://raw.example/stream"
+        );
+    }
+
+    #[test]
+    fn stream_target_rejects_missing_and_non_http_urls() {
+        let mut station = test_station("s2", "S2", 0);
+        station.url = None;
+        station.url_resolved = None;
+        assert!(resolve_stream_target(&station).is_err());
+
+        station.url = Some("file:///etc/passwd".to_string());
+        assert!(resolve_stream_target(&station).is_err());
+
+        station.url = Some("not a url".to_string());
+        assert!(resolve_stream_target(&station).is_err());
+    }
+
+    #[test]
+    fn proxy_redirects_resolve_relative_locations_and_reject_unsafe_urls() {
+        let current = reqwest::Url::parse("http://radio.example/live").unwrap();
+        assert_eq!(
+            redirect_target(&current, "/stream").unwrap().as_str(),
+            "http://radio.example/stream"
+        );
+        assert_eq!(
+            redirect_target(&current, "https://cdn.example/live")
+                .unwrap()
+                .as_str(),
+            "https://cdn.example/live"
+        );
+        assert!(redirect_target(&current, "file:///etc/passwd").is_err());
+        assert!(redirect_target(&current, "http://user:pass@radio.example/").is_err());
+    }
+
+    #[test]
+    fn artwork_relay_skips_svg_content_types() {
+        assert!(is_safe_image_type("image/png"));
+        assert!(is_safe_image_type("IMAGE/JPEG"));
+        assert!(!is_safe_image_type("image/svg+xml"));
+        assert!(!is_safe_image_type("text/html"));
+    }
+
+    #[test]
+    fn proxy_rejects_private_and_reserved_ip_addresses() {
+        assert!(is_non_public_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_non_public_ip("10.0.0.1".parse().unwrap()));
+        assert!(is_non_public_ip("172.16.0.1".parse().unwrap()));
+        assert!(is_non_public_ip("192.168.1.1".parse().unwrap()));
+        assert!(is_non_public_ip("169.254.169.254".parse().unwrap()));
+        assert!(is_non_public_ip("100.64.0.1".parse().unwrap()));
+        assert!(is_non_public_ip("::1".parse().unwrap()));
+        assert!(is_non_public_ip("fc00::1".parse().unwrap()));
+        assert!(is_non_public_ip("fe80::1".parse().unwrap()));
+        assert!(!is_non_public_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_non_public_ip("2606:4700:4700::1111".parse().unwrap()));
     }
 }

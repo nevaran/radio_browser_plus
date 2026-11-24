@@ -5,8 +5,9 @@ A self-hosted web app for discovering, streaming, and organizing stations from t
 ## Features
 
 - Browse all or popular stations, and explore by country, language, or genre.
-- Search and sort by name, popularity, or bitrate.
+- Search the current list by station name, or use `tag:` to match station tags. Comma-separated terms match any tag (for example, `tag:anime,jpop`). Country, language, and genre lists are searchable by label. Stations can be sorted by name, popularity, or bitrate.
 - Stream stations with playback controls and resilient reconnect behavior.
+- Fall back to server-relayed streams and artwork when a station's origin is unreachable (for example ISP or regional block), marked with a purple dot on the station card.
 - Create accounts and save per-user favorites.
 - Optionally allow guest browsing.
 - Admins can view active users and guests, including their current station, IP address, and active time.

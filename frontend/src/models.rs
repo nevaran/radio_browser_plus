@@ -113,6 +113,8 @@ pub struct Favorite {
     pub favicon: Option<String>,
     #[serde(default)]
     pub country: Option<String>,
+    #[serde(default)]
+    pub countrycode: Option<String>,
     #[serde(default, deserialize_with = "opt_stringy_u32")]
     pub bitrate: Option<u32>,
     #[serde(default)]
@@ -205,6 +207,7 @@ pub struct FavoritePayload {
     pub url: Option<String>,
     pub url_resolved: Option<String>,
     pub country: Option<String>,
+    pub countrycode: Option<String>,
     pub bitrate: Option<u32>,
     pub genre: Option<String>,
     pub tags: Option<String>,
@@ -212,18 +215,50 @@ pub struct FavoritePayload {
 
 impl FavoritePayload {
     pub fn from_station(station: &Station, genre: Option<String>) -> Option<Self> {
-        let id = station_id(station)?;
-        let stream = station.url_resolved.clone().or_else(|| station.url.clone());
+        Self::from_station_with_fallback(station, None, genre)
+    }
+
+    pub fn from_station_with_fallback(
+        station: &Station,
+        fallback: Option<&Station>,
+        genre: Option<String>,
+    ) -> Option<Self> {
+        let id = station_id(station).or_else(|| fallback.and_then(station_id))?;
+        let stream = station
+            .url_resolved
+            .clone()
+            .or_else(|| station.url.clone())
+            .or_else(|| fallback.and_then(|saved| saved.url_resolved.clone()))
+            .or_else(|| fallback.and_then(|saved| saved.url.clone()));
         Some(Self {
             station_id: id,
-            name: station.name.clone(),
-            favicon: station.favicon.clone(),
+            name: if station.name.is_empty() {
+                fallback.map(|saved| saved.name.clone()).unwrap_or_default()
+            } else {
+                station.name.clone()
+            },
+            favicon: station
+                .favicon
+                .clone()
+                .or_else(|| fallback.and_then(|saved| saved.favicon.clone())),
             url: stream.clone(),
             url_resolved: stream,
-            country: station.country.clone(),
-            bitrate: station.bitrate,
+            country: station
+                .country
+                .clone()
+                .or_else(|| fallback.and_then(|saved| saved.country.clone())),
+            countrycode: station
+                .countrycode
+                .clone()
+                .or_else(|| fallback.and_then(|saved| saved.countrycode.clone())),
+            bitrate: station
+                .bitrate
+                .or_else(|| fallback.and_then(|saved| saved.bitrate)),
             genre,
-            tags: station.tags.clone(),
+            tags: station
+                .tags
+                .clone()
+                .or_else(|| fallback.and_then(|saved| saved.tags.clone())),
         })
     }
 }
@@ -274,11 +309,65 @@ pub fn favorite_to_station(id: &str, fav: &Favorite) -> Station {
         name: fav.name.clone(),
         favicon: fav.favicon.clone(),
         country: fav.country.clone(),
+        countrycode: fav.countrycode.clone(),
         bitrate: fav.bitrate,
         genre: fav.genre.clone(),
         tags: fav.tags.clone(),
         url: fav.url.clone(),
         url_resolved: fav.url_resolved.clone(),
         ..Station::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{favorite_to_station, Favorite, FavoritePayload, Station};
+    use crate::utils::station_flag_url;
+
+    #[test]
+    fn favorite_payload_preserves_station_country_code() {
+        let station = Station {
+            stationuuid: "station-id".to_string(),
+            countrycode: Some("US".to_string()),
+            ..Station::default()
+        };
+        let payload = FavoritePayload::from_station(&station, None).unwrap();
+
+        assert_eq!(payload.countrycode.as_deref(), Some("US"));
+    }
+
+    #[test]
+    fn favorite_payload_falls_back_to_saved_station_values() {
+        let live = Station {
+            stationuuid: "station-id".to_string(),
+            ..Station::default()
+        };
+        let saved = Station {
+            name: "Saved station".to_string(),
+            country: Some("Canada".to_string()),
+            countrycode: Some("CA".to_string()),
+            url: Some("https://radio.example/stream".to_string()),
+            ..Station::default()
+        };
+        let payload =
+            FavoritePayload::from_station_with_fallback(&live, Some(&saved), None).unwrap();
+
+        assert_eq!(payload.name, "Saved station");
+        assert_eq!(payload.countrycode.as_deref(), Some("CA"));
+        assert_eq!(
+            payload.url_resolved.as_deref(),
+            Some("https://radio.example/stream")
+        );
+    }
+
+    #[test]
+    fn favorite_station_preserves_its_country_flag_code() {
+        let favorite = Favorite {
+            countrycode: Some("US".to_string()),
+            ..Favorite::default()
+        };
+        let station = favorite_to_station("station-id", &favorite);
+
+        assert_eq!(station_flag_url(&station).as_deref(), Some("/flags/us.svg"));
     }
 }

@@ -48,18 +48,25 @@ pub fn App() -> impl IntoView {
             "countries" | "languages" | "tags" | "genres"
         ) && sub.filter.get().is_none();
         if browsing_entries {
-            let entries = sub.collections.get().len();
+            let entries = sub.visible_collection_count();
             if entries > 0 {
                 return format_count(entries, "item");
             }
         } else {
-            let stations = sub.stations.get().len();
+            let stations = sub.visible_station_count();
             if stations > 0 {
                 return format_count(stations, "station");
             }
         }
         if sub.loading.get() {
             return "Tuning in…".to_string();
+        }
+        if !sub.search_query.get().is_empty() {
+            return if browsing_entries {
+                "No items matched that search".to_string()
+            } else {
+                "No stations matched that search".to_string()
+            };
         }
         match sub.view.get().as_str() {
             "favorites" => "Star a station to keep it here".to_string(),

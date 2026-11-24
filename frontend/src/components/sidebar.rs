@@ -125,8 +125,8 @@ pub fn Sidebar() -> impl IntoView {
                     <input
                         id="search"
                         type="search"
-                        placeholder="Search stations…"
-                        aria-label="Search stations"
+                        placeholder="Search names or tag:…"
+                        aria-label="Search current list by name or station tag"
                         node_ref=search_ref
                         on:input=on_search_input
                     />

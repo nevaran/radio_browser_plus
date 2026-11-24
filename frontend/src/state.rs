@@ -23,7 +23,6 @@ use crate::utils::{
 
 const VIEW_KEY: &str = "radio-browser-plus-last-view";
 const SORT_KEY: &str = "radio-browser-plus-sort";
-const SEARCH_DEBOUNCE_MS: u32 = 300;
 pub const STATION_REFRESH_MS: u32 = 21_600_000; // 6 hours, as before
 /// Automatic retries for a failed view load before the error is surfaced.
 /// Big catalog fetches occasionally stall or fail upstream; retrying keeps a
@@ -116,6 +115,9 @@ pub struct AppState {
     /// Currently open in-app dialog, if any (replaces `alert`/`confirm`).
     pub dialog: RwSignal<Option<AppDialog>>,
     pub player: Player,
+    /// Station ids that had to fall back to the server proxy this session
+    /// (stream or artwork); their cards show the failover marker.
+    pub failover: RwSignal<HashSet<String>>,
     pub login_open: RwSignal<bool>,
     pub create_user_open: RwSignal<bool>,
     pub change_password_open: RwSignal<bool>,
@@ -123,12 +125,12 @@ pub struct AppState {
     pub compact_bar: RwSignal<bool>,
     pub resize_tick: RwSignal<u64>,
     view_gen: RwSignal<u64>,
-    search_gen: RwSignal<u64>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        let player = Player::new();
+        let failover = RwSignal::new(HashSet::new());
+        let player = Player::new(failover);
         let sort = LocalStorage::get::<String>(SORT_KEY)
             .map(|key| SortMode::from_key(&key))
             .unwrap_or(SortMode::Featured);
@@ -159,6 +161,7 @@ impl AppState {
             share_open: RwSignal::new(None),
             dialog: RwSignal::new(None),
             player,
+            failover,
             login_open: RwSignal::new(false),
             create_user_open: RwSignal::new(false),
             change_password_open: RwSignal::new(false),
@@ -166,7 +169,6 @@ impl AppState {
             compact_bar: RwSignal::new(false),
             resize_tick: RwSignal::new(0),
             view_gen: RwSignal::new(0),
-            search_gen: RwSignal::new(0),
         }
     }
 
@@ -373,34 +375,49 @@ impl AppState {
                     return;
                 }
             };
-            let genre = crate::utils::station_genre(&live);
-            if genre == "Unknown genre" {
+            let live_genre = crate::utils::station_genre(&live);
+            let genre = (live_genre != "Unknown genre")
+                .then_some(live_genre)
+                .or_else(|| station.genre.clone());
+            if genre.is_none() && live.countrycode.is_none() {
                 return;
             }
-            let payload = crate::models::FavoritePayload {
-                station_id: id.clone(),
-                name: live.name.clone(),
-                favicon: live.favicon.clone(),
-                url: live.url_resolved.clone().or_else(|| live.url.clone()),
-                url_resolved: live.url_resolved.clone().or_else(|| live.url.clone()),
-                country: live.country.clone(),
-                bitrate: live.bitrate,
-                genre: Some(genre),
-                tags: live.tags.clone(),
+            let Some(payload) = crate::models::FavoritePayload::from_station_with_fallback(
+                &live,
+                Some(&station),
+                genre,
+            ) else {
+                return;
             };
-            if let Ok(resp) = api::update_favorite(&payload).await {
-                this.favorites.set(resp.favorites);
+            match api::update_favorite(&payload).await {
+                Ok(resp) => {
+                    this.favorites.set(resp.favorites);
+                    if this.view.get_untracked() == "favorites"
+                        && this.filter.get_untracked().is_none()
+                    {
+                        this.load_view();
+                    }
+                }
+                Err(error) => this.api_failed(error),
             }
         });
     }
 
     // -- playback queue (previous / next) ----------------------------------
 
+    /// Record that a station needed the server proxy so its card can show the
+    /// failover marker.
+    pub fn mark_failover(&self, station_id: &str) {
+        self.failover.update(|set| {
+            set.insert(station_id.to_string());
+        });
+    }
+
     /// Direct play from a station card: capture the visible list as the
     /// navigation context, then start playback. The queue preserves display
     /// order, so previous / next follow what the user saw.
     pub fn play_from_visible_list(&self, station: Station) {
-        let visible = self.stations.get_untracked();
+        let visible = self.display_stations();
         if !visible.is_empty() {
             self.queue.set(visible);
         }
@@ -526,11 +543,44 @@ impl AppState {
         let _ = LocalStorage::set(SORT_KEY, mode.key());
     }
 
-    /// Fetched stations with the user's sort mode applied, for display.
+    /// Fetched stations filtered by the local search and sorted for display.
     pub fn display_stations(&self) -> Vec<Station> {
+        let query = self.search_query.get().trim().to_lowercase();
         let mut stations = self.stations.get();
+        if !query.is_empty() {
+            stations.retain(|station| station_matches_query(station, &query));
+        }
         sort_stations(&mut stations, self.sort.get());
         stations
+    }
+
+    pub fn visible_station_count(&self) -> usize {
+        let query = self.search_query.get().trim().to_lowercase();
+        self.stations.with(|stations| {
+            stations
+                .iter()
+                .filter(|station| station_matches_query(station, &query))
+                .count()
+        })
+    }
+
+    pub fn display_collections(&self) -> Vec<CollectionItem> {
+        let query = self.search_query.get().trim().to_lowercase();
+        let mut collections = self.collections.get();
+        if !query.is_empty() {
+            collections.retain(|item| collection_matches_query(item, &query));
+        }
+        collections
+    }
+
+    pub fn visible_collection_count(&self) -> usize {
+        let query = self.search_query.get().trim().to_lowercase();
+        self.collections.with(|collections| {
+            collections
+                .iter()
+                .filter(|item| collection_matches_query(item, &query))
+                .count()
+        })
     }
 
     /// Rows the active grid displays: collections for the entry views
@@ -541,9 +591,19 @@ impl AppState {
             "countries" | "languages" | "tags" | "genres"
         ) && self.filter.get_untracked().is_none();
         if collection {
-            self.collections.get_untracked().len()
+            let query = self.search_query.get_untracked().trim().to_lowercase();
+            self.collections
+                .get_untracked()
+                .iter()
+                .filter(|item| collection_matches_query(item, &query))
+                .count()
         } else {
-            self.stations.get_untracked().len()
+            let query = self.search_query.get_untracked().trim().to_lowercase();
+            self.stations
+                .get_untracked()
+                .iter()
+                .filter(|station| station_matches_query(station, &query))
+                .count()
         }
     }
 
@@ -612,19 +672,17 @@ impl AppState {
         let row_h = card_h + gap;
         let rows_remaining = total.saturating_sub(shown).div_ceil(cols);
         let spacer = (rows_remaining as f64 * row_h) as usize;
-        // Exact end of the mounted rows: the footer sits directly below
-        // them, so its far edge in grid coordinates is the load threshold.
-        // (Derived from the footer — never from the scroll height, which
-        // already contains the previous spacer and would feed back into
-        // runaway growth.) `.station-grid` is positioned so the grid is the
-        // footer's offset parent and the coordinates match the scroll ones.
-        let threshold = grid
-            .query_selector(".grid-footer")
+        // The scroll height includes the spacer for unmounted rows. Subtract
+        // its measured height to get the end of the mounted content without
+        // relying on offsetTop, whose offset parent can vary with grid layout.
+        let current_spacer = grid
+            .query_selector(".grid-spacer")
             .ok()
             .flatten()
             .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
-            .map(|footer| footer.offset_top() + footer.offset_height())
-            .unwrap_or(i32::MAX);
+            .map(|spacer| spacer.offset_height().max(0))
+            .unwrap_or(0);
+        let threshold = grid.scroll_height().saturating_sub(current_spacer);
         if self.spacer_px.get_untracked() != spacer {
             self.spacer_px.set(spacer);
         }
@@ -899,24 +957,9 @@ impl AppState {
         let filter = self.filter.get_untracked();
 
         if view == "search" {
-            let query = self.search_query.get_untracked();
-            if query.trim().is_empty() {
-                self.view.set("popular".to_string());
-                self.load_view();
-                return;
-            }
-            match api::search_stations(&query).await {
-                Ok(stations) => {
-                    if self.current_gen(r#gen)
-                        && self.view.get_untracked() == "search"
-                        && self.search_query.get_untracked() == query
-                    {
-                        self.stations.set(stations);
-                        self.view_title.set(format!("Search: {query}"));
-                    }
-                }
-                Err(e) => self.note_view_error(e, self.current_gen(r#gen)),
-            }
+            self.view.set("popular".to_string());
+            self.filter.set(None);
+            self.load_view();
             return;
         }
 
@@ -1063,58 +1106,80 @@ impl AppState {
     // -- search ------------------------------------------------------------
 
     pub fn apply_search(&self, query: String) {
+        let trimmed = query.trim().to_string();
+        if self.search_query.get_untracked() == trimmed {
+            return;
+        }
         self.reset_grid_window();
-        // A new keystroke is a new attempt: drop any previous search error.
         if self.view_error.get_untracked().is_some() {
             self.view_error.set(None);
         }
-        let trimmed = query.trim().to_string();
-        self.search_query.set(trimmed.clone());
-        if trimmed.is_empty() {
-            self.view.set("popular".to_string());
-            self.view_title.set("Popular".to_string());
-            self.load_view();
-            return;
-        }
-        self.view.set("search".to_string());
-        self.view_title
-            .set(title_for_view("search", None, &trimmed));
-        self.loading.set(true);
-        // Abandon any in-flight view load: the debounced search below owns
-        // the spinner and the error slot from here on.
-        self.view_gen.update(|g| *g += 1);
-        self.search_gen.update(|g| *g += 1);
-        let r#gen = self.search_gen.get_untracked();
-        let this = self.clone();
-        leptos::task::spawn_local(async move {
-            TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
-            if this.search_gen.get_untracked() != r#gen {
-                return;
-            }
-            match api::search_stations(&trimmed).await {
-                Ok(stations) => {
-                    if this.view.get_untracked() == "search"
-                        && this.search_query.get_untracked() == trimmed
-                    {
-                        this.stations.set(stations);
-                        this.view_title.set(format!("Search: {trimmed}"));
-                    }
-                    if this.search_gen.get_untracked() == r#gen {
-                        this.loading.set(false);
-                    }
-                }
-                Err(e) => {
-                    if this.search_gen.get_untracked() == r#gen {
-                        this.loading.set(false);
-                        this.note_view_error(e, true);
-                    } else {
-                        // A superseded keystroke owns nothing, except auth
-                        // loss which must always lock the UI.
-                        this.api_failed(e);
-                    }
-                }
-            }
-        });
+        self.search_query.set(trimmed);
+    }
+}
+
+fn station_matches_query(station: &Station, query: &str) -> bool {
+    if let Some(tag_query) = query.strip_prefix("tag:") {
+        return tag_query
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .any(|query_tag| {
+                station.tags.as_deref().is_some_and(|tags| {
+                    tags.split(',')
+                        .any(|tag| tag.trim().to_lowercase().contains(query_tag))
+                })
+            });
+    }
+    query.is_empty() || station.name.to_lowercase().contains(query)
+}
+
+fn collection_matches_query(item: &CollectionItem, query: &str) -> bool {
+    query.is_empty()
+        || item.label.to_lowercase().contains(query)
+        || item.filter_value.to_lowercase().contains(query)
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::{collection_matches_query, station_matches_query};
+    use crate::models::{CollectionItem, Station};
+
+    #[test]
+    fn local_search_matches_station_names_not_metadata() {
+        let station = Station {
+            name: "Evening Radio".to_string(),
+            country: Some("Canada".to_string()),
+            language: Some("French".to_string()),
+            genre: Some("Jazz".to_string()),
+            tags: Some("Jazz, Fusion, Anime, J-Pop".to_string()),
+            ..Station::default()
+        };
+        assert!(station_matches_query(&station, "evening"));
+        assert!(station_matches_query(&station, "tag:jazz"));
+        assert!(station_matches_query(&station, "tag:fus"));
+        assert!(station_matches_query(&station, "tag:anime,jpop"));
+        assert!(station_matches_query(&station, "tag:missing,anime"));
+        assert!(!station_matches_query(&station, "tag:radio"));
+        assert!(!station_matches_query(&station, "tag:"));
+        assert!(!station_matches_query(&station, "jazz"));
+        assert!(!station_matches_query(&station, "canada"));
+        assert!(!station_matches_query(&station, "french"));
+        assert!(!station_matches_query(&station, "rock"));
+        assert!(station_matches_query(&station, ""));
+    }
+
+    #[test]
+    fn local_search_matches_collection_labels_and_filters() {
+        let item = CollectionItem {
+            label: "French".to_string(),
+            filter_value: "fr".to_string(),
+            count: None,
+            icon_url: String::new(),
+        };
+        assert!(collection_matches_query(&item, "french"));
+        assert!(collection_matches_query(&item, "fr"));
+        assert!(!collection_matches_query(&item, "spanish"));
     }
 }
 

@@ -117,6 +117,8 @@ pub struct Favorite {
     pub url_resolved: Option<String>,
     pub favicon: Option<String>,
     pub country: Option<String>,
+    #[serde(default)]
+    pub countrycode: Option<String>,
     pub bitrate: Option<u32>,
     pub genre: Option<String>,
     pub tags: Option<String>,
@@ -193,6 +195,8 @@ pub struct ToggleFavoriteRequest {
     pub url: Option<String>,
     pub url_resolved: Option<String>,
     pub country: Option<String>,
+    #[serde(default)]
+    pub countrycode: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_u32")]
     pub bitrate: Option<u32>,
     pub genre: Option<String>,
@@ -210,6 +214,8 @@ pub struct UpdateFavoriteRequest {
     pub url: Option<String>,
     pub url_resolved: Option<String>,
     pub country: Option<String>,
+    #[serde(default)]
+    pub countrycode: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_u32")]
     pub bitrate: Option<u32>,
     pub genre: Option<String>,
@@ -229,6 +235,7 @@ macro_rules! impl_favorite_from_request {
                     url: payload.url,
                     url_resolved: payload.url_resolved,
                     country: payload.country,
+                    countrycode: payload.countrycode,
                     bitrate: payload.bitrate,
                     genre: payload.genre,
                     tags: payload.tags,

@@ -7,8 +7,8 @@ use web_sys::HtmlImageElement;
 use crate::models::{station_id, station_id_ref, Station};
 use crate::state::AppState;
 use crate::utils::{
-    card_playback, primary_image, station_flag_url, station_genre, truncate_name, CardPlayback,
-    PLACEHOLDER_SVG,
+    card_playback, primary_image, station_flag_url, station_genre, station_proxy_art_url,
+    truncate_name, CardPlayback, PLACEHOLDER_SVG,
 };
 
 /// Stroke icon used by empty-state blocks.
@@ -118,6 +118,9 @@ fn StationCard(station: Station) -> impl IntoView {
         .unwrap_or_else(|| "Unknown".to_string());
     let name = truncate_name(&station.name, 50);
     let flag = station_flag_url(&station);
+    if flag.is_none() && state.favorites.get_untracked().contains_key(&id) {
+        state.refresh_favorite_metadata(station.clone());
+    }
     // Bitrate lives in the art badge, so the meta line carries genre instead.
     let genre = truncate_name(&station_genre(&station), 26);
     let meta = format!("{country} · {genre}");
@@ -134,12 +137,15 @@ fn StationCard(station: Station) -> impl IntoView {
     let store = StoredValue::new(state.clone());
     let user = state.user;
     let favorites = state.favorites;
+    let failover = state.failover;
     let current = state.player.current;
     let is_playing = state.player.is_playing;
     let loading = state.player.loading;
     let play_station = station.clone();
     let play_station_key = station.clone();
     let image_src = primary_image(&station);
+    let art_proxy = station_proxy_art_url(&station);
+    let art_proxy_load = art_proxy.clone();
     let station_store = StoredValue::new(station);
     let fav_id = StoredValue::new(id.clone());
     let id_store = StoredValue::new(id.clone());
@@ -163,6 +169,7 @@ fn StationCard(station: Station) -> impl IntoView {
             class:favorite=move || fav_id.with_value(|fid| favorites.with(|m| m.contains_key(fid)))
             class:current=move || !matches!(status.get(), CardPlayback::Idle)
             class:playing=move || matches!(status.get(), CardPlayback::Playing)
+            class:failover=move || failover.with(|set| fav_id.with_value(|id| set.contains(id)))
             data-station=article_id
             role="button"
             tabindex="0"
@@ -188,12 +195,36 @@ fn StationCard(station: Station) -> impl IntoView {
                     loading="lazy"
                     decoding="async"
                     on:error=move |ev| {
-                        if let Some(target) = ev.target() {
-                            if let Ok(img) = target.dyn_into::<HtmlImageElement>() {
-                                if img.src() != PLACEHOLDER_SVG {
-                                    img.set_src(PLACEHOLDER_SVG);
-                                }
-                            }
+                        let Some(target) = ev.target() else { return; };
+                        let Ok(img) = target.dyn_into::<HtmlImageElement>() else {
+                            return;
+                        };
+                        let current_src = img.src();
+                        if current_src == PLACEHOLDER_SVG {
+                            return;
+                        }
+                        // The direct cover failed — typically the same blocked
+                        // origin as the stream. Retry it through the server.
+                        if let Some(proxy) = art_proxy.as_deref()
+                            && !current_src.ends_with(proxy)
+                        {
+                            img.set_src(proxy);
+                            return;
+                        }
+                        img.set_src(PLACEHOLDER_SVG);
+                    }
+                    // Mark only a cover actually served by the proxy; a dead
+                    // cover that fails upstream too must not earn the marker.
+                    on:load=move |ev| {
+                        let Some(proxy) = art_proxy_load.as_deref() else { return; };
+                        let Some(target) = ev.target() else { return; };
+                        let Ok(img) = target.dyn_into::<HtmlImageElement>() else {
+                            return;
+                        };
+                        if img.src().ends_with(proxy) {
+                            fav_id.with_value(|id| {
+                                store.with_value(|s| s.mark_failover(id));
+                            });
                         }
                     }
                 />
@@ -255,6 +286,13 @@ fn StationCard(station: Station) -> impl IntoView {
                     <span class="station-meta-text">{meta}</span>
                 </div>
             </div>
+            <Show when=move || failover.with(|set| fav_id.with_value(|id| set.contains(id)))>
+                <span
+                    class="failover-dot"
+                    title="Direct connection unavailable — using the server proxy"
+                    aria-label="Server failover active"
+                ></span>
+            </Show>
         </article>
     }
 }
@@ -264,9 +302,8 @@ pub fn StationGrid() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState provided");
     let visible = state.clone();
     let listed = state.clone();
-    let totals = state.clone();
+    let grid_limit = state.grid_limit;
     let store = StoredValue::new(state.clone());
-    let foot_store = StoredValue::new(state.clone());
     let err_store = StoredValue::new(state.clone());
     let spacer_state = state.clone();
     let spacer_px = state.clone();
@@ -278,6 +315,7 @@ pub fn StationGrid() -> impl IntoView {
     Effect::new(move |_| {
         spacer_state.grid_limit.get();
         let _ = spacer_state.stations.with(|rows| rows.len());
+        let _ = spacer_state.search_query.get();
         spacer_state.resize_tick.get();
         spacer_state.update_spacer();
     });
@@ -286,19 +324,26 @@ pub fn StationGrid() -> impl IntoView {
     // windowed to the mounted page: only the first `grid_limit` rows mount,
     // so images, DOM nodes and reactive scopes stay bounded no matter how
     // many rows the fetch returned. Infinite scroll grows the window.
+    let station_list = Memo::new(move |_| listed.display_stations());
     let stations = Memo::new(move |_| {
-        let mut list = listed.display_stations();
-        list.truncate(listed.grid_limit.get());
+        let mut list = station_list.get();
+        list.truncate(grid_limit.get());
         list
     });
 
     let empty = move || {
-        let kind = match visible.view.get().as_str() {
-            "favorites" => "radio",
-            "search" => "search",
-            _ => "globe",
+        if !visible.search_query.get().is_empty() {
+            return empty_state(
+                empty_icon("search"),
+                "No stations matched".to_string(),
+                "Try another search or clear the search field to see the full list.".to_string(),
+                None,
+            );
+        }
+        let icon = match visible.view.get().as_str() {
+            "favorites" => empty_icon("radio"),
+            _ => empty_icon("globe"),
         };
-        let icon = empty_icon(kind);
         let store = store;
         match visible.view.get().as_str() {
             "favorites" => empty_state(
@@ -357,11 +402,11 @@ pub fn StationGrid() -> impl IntoView {
         >
             {view! {
                 // Only the mounted window renders: every fetched row stays
-                // reachable (infinite scroll + Load more), but off-window
-                // rows never mount cards, images or scopes. Nothing is cut —
-                // the tail after display sorting is disproportionately
-                // regional or non-Latin-script stations, so it must stay
-                // one scroll away, not dropped.
+                // reachable through infinite scroll, but off-window rows
+                // never mount cards, images or scopes. Nothing is cut — the
+                // tail after display sorting is disproportionately regional
+                // or non-Latin-script stations, so it must stay one scroll
+                // away, not dropped.
                 <For
                     each=move || stations.get()
                     key=|s| station_id(s).unwrap_or_default()
@@ -371,22 +416,13 @@ pub fn StationGrid() -> impl IntoView {
                 </For>
                 {move || {
                     let shown = stations.get().len();
-                    let total = totals.stations.get().len();
+                    let total = station_list.get().len();
                     if shown < total {
                         view! {
                             <div class="grid-footer">
                                 <span class="grid-count">
                                     {format!("Showing {shown} of {total}")}
                                 </span>
-                                <button
-                                    type="button"
-                                    class="secondary-button"
-                                    on:click=move |_| {
-                                        foot_store.with_value(|s| s.show_more());
-                                    }
-                                >
-                                    "Load more"
-                                </button>
                             </div>
                         }
                             .into_any()

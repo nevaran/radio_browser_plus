@@ -292,6 +292,30 @@ pub fn primary_image(station: &Station) -> String {
         .unwrap_or_else(|| PLACEHOLDER_SVG.to_string())
 }
 
+/// Same-origin server-proxy stream URL, used when the station origin is
+/// unreachable from the browser (ISP or regional block).
+pub fn station_proxy_stream_url(station: &Station) -> Option<String> {
+    station_id(station).map(|id| format!("/api/stations/{}/stream", encode_segment(&id)))
+}
+
+/// Same-origin server-proxy artwork URL for the same failover.
+pub fn station_proxy_art_url(station: &Station) -> Option<String> {
+    station_id(station).map(|id| format!("/api/stations/{}/art", encode_segment(&id)))
+}
+
+fn encode_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Stream-health indicator, same scoring formula as the previous frontend.
 /// Returns `(bar_height_pct, hue, lightness, tooltip)`.
 pub fn status_score(station: &Station) -> (u8, u16, u16, String) {
@@ -567,5 +591,32 @@ mod tests {
             ..Station::default()
         };
         assert_eq!(station_flag_url(&bogus), None);
+    }
+
+    #[test]
+    fn proxy_urls_are_same_origin_and_path_encoded() {
+        let station = Station {
+            stationuuid: "abc-123".into(),
+            ..Station::default()
+        };
+        assert_eq!(
+            station_proxy_stream_url(&station).as_deref(),
+            Some("/api/stations/abc-123/stream")
+        );
+        assert_eq!(
+            station_proxy_art_url(&station).as_deref(),
+            Some("/api/stations/abc-123/art")
+        );
+
+        let odd = Station {
+            stationuuid: "a/b c".into(),
+            ..Station::default()
+        };
+        assert_eq!(
+            station_proxy_stream_url(&odd).as_deref(),
+            Some("/api/stations/a%2Fb%20c/stream")
+        );
+
+        assert_eq!(station_proxy_art_url(&Station::default()), None);
     }
 }

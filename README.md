@@ -47,7 +47,7 @@ Set these variables in `.env`; Compose forwards them to the container.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `RADIO_BROWSER_STATION_LIMIT` | `1000` | Default station request limit. `0` uses the default. |
+| `RADIO_BROWSER_STATION_LIMIT` | `1000` | Default station request limit. `0` uses the default; `-1` requests the upstream's 100,000-station limit. |
 | `ALLOW_GUEST_ACCESS` | `0` | Set to `1`, `true`, `yes`, or `on` to allow browsing without signing in. Favorites and account actions still require an account. |
 | `ADMIN_STATS_ENABLED` | `0` | Enable the admin-only active sessions view and presence tracking. |
 | `LOG_RETENTION_DAYS` | `0` | Keep activity entries for this many days. `0` disables activity logging. When enabled, the readable log is written to `/app/data/activity.log`. |

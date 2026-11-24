@@ -26,14 +26,23 @@ fn check_filter_len(value: &str, what: &str) -> Result<()> {
 }
 
 /// Default station count per request, from `RADIO_BROWSER_STATION_LIMIT`
-/// (0/unset/unparsable means 1000). Deliberately uncapped: an explicit
-/// operator setting is passed through to the upstream API as-is.
+/// (0/unset/unparsable means 1000, -1 selects the upstream's 100000 limit).
+/// Deliberately uncapped: an explicit positive operator setting is passed
+/// through to the upstream API as-is.
 /// Collection cards clamp their displayed counts to this: it is what a click
 /// actually fetches, so larger upstream totals would be unreachable.
+const DEFAULT_STATION_LIMIT: u32 = 1000;
+const MAX_API_STATION_LIMIT: u32 = 100_000;
+
 fn parse_station_limit(raw: Option<&str>) -> u32 {
-    raw.and_then(|value| value.trim().parse::<u32>().ok())
-        .map(|n| if n == 0 { 1000 } else { n })
-        .unwrap_or(1000)
+    raw.and_then(|value| value.trim().parse::<i64>().ok())
+        .and_then(|n| match n {
+            -1 => Some(MAX_API_STATION_LIMIT),
+            0 => Some(DEFAULT_STATION_LIMIT),
+            n if n > 0 => u32::try_from(n).ok(),
+            _ => None,
+        })
+        .unwrap_or(DEFAULT_STATION_LIMIT)
 }
 
 pub(crate) fn default_station_limit() -> u32 {
@@ -193,6 +202,8 @@ mod tests {
     fn station_limit_parses_cleanly() {
         assert_eq!(parse_station_limit(None), 1000);
         assert_eq!(parse_station_limit(Some("0")), 1000);
+        assert_eq!(parse_station_limit(Some("-1")), 100_000);
+        assert_eq!(parse_station_limit(Some("-2")), 1000);
         assert_eq!(parse_station_limit(Some(" 25 ")), 25);
         assert_eq!(parse_station_limit(Some("9999")), 9999);
         assert_eq!(parse_station_limit(Some("abc")), 1000);
